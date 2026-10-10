@@ -1,0 +1,17 @@
+[Unit]
+Description=Xiaotao Multica content publishing and comment notifications
+After=network-online.target xhs-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/leo-project/xhs
+Environment=CONFIG_FILE=/home/ubuntu/leo-project/xhs/.local/runtime.yaml
+ExecStart=/home/ubuntu/leo-project/xhs/.venv/bin/python -m backend.app.services.content_automation
+Restart=on-failure
+RestartSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

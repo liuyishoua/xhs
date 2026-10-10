@@ -1,0 +1,19 @@
+[Unit]
+Description=XHS ALL IN ONE operations platform
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/leo-project/xhs
+Environment=CONFIG_FILE=/home/ubuntu/leo-project/xhs/.local/runtime.yaml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/leo-project/xhs/.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8772
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

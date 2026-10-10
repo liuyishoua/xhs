@@ -1,0 +1,18 @@
+[Unit]
+Description=XHS PC home network tunnel via Mac mini
+Wants=network-online.target
+After=network-online.target tailscaled.service
+StartLimitIntervalSec=0
+
+[Service]
+User=ubuntu
+ExecStart=/usr/bin/ssh -NT -D 127.0.0.1:18890 -i /home/ubuntu/.ssh/xhs_home_probe_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=8 -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 leo@100.117.21.117
+Restart=always
+RestartSec=10
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
