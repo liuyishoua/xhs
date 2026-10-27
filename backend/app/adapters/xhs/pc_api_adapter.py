@@ -4,11 +4,13 @@ from typing import Any
 
 from backend.app.adapters.xhs.request_env import direct_xhs_request_env
 from backend.app.services import xhs_network
+from backend.app.services.account_health import profile_failure, require_pc_session
 
 
 class XhsPcApiAdapter:
     def __init__(self, cookies: str) -> None:
         self.cookies = cookies
+        self.refreshed_cookies = None
 
     def _api(self):
         from apis.xhs_pc_apis import XHS_Apis
@@ -54,16 +56,23 @@ class XhsPcApiAdapter:
 
     def get_self_info(self) -> Any:
         with direct_xhs_request_env():
-            success, message, res_json = self._api().get_user_me()
-        payload = (res_json or {}).get("data") if isinstance(res_json, dict) else None
-        if not success or not payload:
-            raise RuntimeError(message or "XHS self profile refresh failed")
+            api = self._api()
+            try:
+                success, message, res_json = api.get_user_me()
+                payload = (res_json or {}).get("data") if isinstance(res_json, dict) else None
+                if not success or not payload:
+                    raise profile_failure(res_json)
+                if payload.get('user_id') and not payload.get('guest'):
+                    self.refreshed_cookies = dict(api.auth.profile.cookie_map)
+            finally:
+                api.http.close()
         return payload
 
     def get_mentions(self, cursor: str = "") -> dict[str, Any]:
         with direct_xhs_request_env():
             success, _, payload = self._api().get_metions(cursor)
         if not success or not isinstance(payload, dict):
+            require_pc_session(payload)
             raise RuntimeError("小红书评论通知读取失败")
         return payload.get("data") or {}
 
@@ -76,17 +85,67 @@ class XhsPcApiAdapter:
         with direct_xhs_request_env():
             api = self._api()
             path = "/api/sns/web/v1/comment/post"
-            headers, cookies, data = api._request_params(path, body, "POST")
-            response = api.http.post(api.base_url + path, headers=headers,
-                                     cookies=cookies, data=data.encode('utf-8'), timeout=REQUEST_TIMEOUT)
-            payload = response.json()
+            try:
+                headers, cookies, data = api._request_params(path, body, "POST")
+                response = api.http.post(api.base_url + path, headers=headers,
+                                         cookies=cookies, data=data.encode('utf-8'), timeout=REQUEST_TIMEOUT)
+                payload = response.json()
+                # Record observations of this POST, separately from a prior
+                # network health probe. Never retain cookies or signing values.
+                transport = {"client": "pc_web_direct", "endpoint": path,
+                             "http_status": response.status_code,
+                             "platform_observed_exit_ip": response.headers.get("xhs-real-ip")}
+            finally:
+                api.http.close()
         if payload.get("success") is not True:
+            require_pc_session(payload)
             raise RuntimeError("小红书评论提交未确认，code=" + str(payload.get("code")))
-        return payload
+        return {**payload, "_transport": transport}
 
     def get_recent_user_notes(self, user_id: str) -> dict[str, Any]:
         with direct_xhs_request_env():
             success, _, payload = self._api().get_user_note_info(user_id, '')
         if not success or not isinstance(payload, dict):
+            require_pc_session(payload)
             raise RuntimeError('小红书最新笔记读取失败')
         return payload.get('data') or {}
+
+    def get_homefeed(self) -> dict[str, Any]:
+        with direct_xhs_request_env():
+            api = self._api()
+            try:
+                success, _, payload = api.get_homefeed_recommend('homefeed_recommend', '', 1, 0)
+            finally:
+                api.http.close()
+        if not success or not isinstance(payload, dict):
+            require_pc_session(payload)
+            raise ValueError('推荐流读取失败')
+        return payload.get('data') or {}
+
+    def get_likes(self, cursor: str = '') -> dict[str, Any]:
+        with direct_xhs_request_env():
+            api = self._api()
+            try:
+                success, _, payload = api.get_likesAndcollects(cursor)
+            finally:
+                api.http.close()
+        if not success or not isinstance(payload, dict):
+            require_pc_session(payload)
+            raise ValueError('点赞通知读取失败')
+        return payload.get('data') or {}
+
+    def get_comment_preview(self, note_url: str) -> list[str]:
+        from urllib.parse import urlsplit, parse_qs
+        parsed = urlsplit(note_url)
+        note_id = parsed.path.rstrip('/').split('/')[-1]
+        token = parse_qs(parsed.query).get('xsec_token', [''])[0]
+        with direct_xhs_request_env():
+            api = self._api()
+            try:
+                success, _, payload = api.get_note_out_comment(note_id, '', token)
+            finally:
+                api.http.close()
+        if not success or not isinstance(payload, dict):
+            require_pc_session(payload)
+            raise ValueError('评论参考读取失败')
+        return [str(c.get('content') or '')[:200] for c in ((payload.get('data') or {}).get('comments') or [])[:5]]

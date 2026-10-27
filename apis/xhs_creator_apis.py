@@ -286,6 +286,7 @@ class XHS_Creator_Apis:
 
     # media_type: image or video
     def get_fileIds(self, media_type, proxies=None):
+        self.last_upload_failure = None
         try:
             api = "/api/media/v1/upload/creator/permit"
             params = get_fileIds_params(media_type)
@@ -310,8 +311,21 @@ class XHS_Creator_Apis:
                 timeout=REQUEST_TIMEOUT,
             )
             res_json = response.json()
-            success, msg = res_json["success"], '获取fileIds成功'
+            success = bool(res_json.get('success')) and 200 <= response.status_code < 300
+            if success:
+                updates = {k: v for k, v in getattr(response, 'cookies', {}).items() if k != 'acw_tc'}
+                if updates:
+                    self.auth.update_cookies(updates, source_url=self.base_url + splice_api)
+                msg = '获取fileIds成功'
+            else:
+                code = res_json.get('code')
+                self.last_upload_failure = {'phase': 'permit', 'http_status': response.status_code,
+                    'business_code': code if isinstance(code, int) else None}
+                msg = f'HTTP {response.status_code}, code={self.last_upload_failure["business_code"]}'
+                if code == 906:
+                    msg += '，账号存在风险，请重新登录'
         except Exception as error:
+            self.last_upload_failure = {'phase': 'permit', 'http_status': None, 'business_code': None}
             return False, _log_api_error(error), (None, None)
         return success, msg, (res_json, headers['x-t'])
 

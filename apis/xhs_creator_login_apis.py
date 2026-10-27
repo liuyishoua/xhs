@@ -937,6 +937,8 @@ class XHSCreatorLoginApi:
         )
         values = self._merge_response_cookies(response)
         result = response.json()
+        self.last_user_info_code = result.get('code')
+        self.last_user_info_http_status = response.status_code
         return result.get('success', False), result.get('data') or {}, values
 
     def send_phone_code(self, phone, cookies=None, zone='86'):

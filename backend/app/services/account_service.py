@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.security import decrypt_text, encrypt_text
 from backend.app.core.time import shanghai_now
-from backend.app.models import AccountCookieVersion, PlatformAccount
+from backend.app.models import AccountCookieVersion, PlatformAccount, ApiLog
 from xhs_utils.cookie_util import trans_cookies
 
 
@@ -22,6 +22,8 @@ def account_profile_from_user_info(user_info: dict[str, Any]) -> dict[str, Any]:
 
 def decode_cookie_text(value: str) -> dict[str, Any]:
     stripped = value.strip()
+    if stripped[:7].lower() == 'cookie:':
+        stripped = stripped[7:].lstrip()
     if not stripped:
         return {}
     if stripped.startswith("{"):
@@ -33,6 +35,8 @@ def decode_cookie_text(value: str) -> dict[str, Any]:
 
 def cookie_header_from_text(value: str) -> str:
     stripped = value.strip()
+    if stripped[:7].lower() == 'cookie:':
+        stripped = stripped[7:].lstrip()
     if not stripped:
         return ""
     if not stripped.startswith("{"):
@@ -41,7 +45,30 @@ def cookie_header_from_text(value: str) -> str:
     return "; ".join(f"{key}={cookie_value}" for key, cookie_value in cookies.items())
 
 
-def persist_refreshed_pc_cookies(db, account_id, original, refreshed):
+def record_session_event(db, account, source, status, *, cookie_version_id=None, business_code=None, changed_names=None, component=None, operation_key=None):
+    # Only allowlisted metadata: no credential values, headers or check errors.
+    component=component or ('listener.dm' if source=='dm_websocket' else 'listener.comment' if source.startswith('comment_') else 'publisher' if source.startswith('creator_') else 'account')
+    meta = {'account_id': account.id, 'external_id': account.external_user_id, 'source': source, 'component':component, 'cookie_version_id': cookie_version_id}
+    if business_code is not None:
+        meta['business_code'] = business_code
+    if changed_names is not None:
+        meta['changed_cookie_names'] = sorted(changed_names)
+    if operation_key is not None:
+        meta['operation_key'] = operation_key
+    row=ApiLog(user_id=account.user_id, platform='xhs', endpoint='internal/xhs/account-session', status=status, meta=meta)
+    db.add(row)
+    from backend.app.services.maintenance_events import stage
+    stage(db,account,row)
+
+
+def cookie_version_is_current(db, account_id, version_id, encrypted_cookies):
+    # Read columns directly: an ORM identity-map entry can contain stale values.
+    latest = db.execute(select(AccountCookieVersion.id, AccountCookieVersion.encrypted_cookies).where(
+        AccountCookieVersion.platform_account_id == account_id).order_by(AccountCookieVersion.id.desc()).limit(1)).first()
+    return bool(latest and latest.id == version_id and latest.encrypted_cookies == encrypted_cookies)
+
+
+def persist_refreshed_account_cookies(db, account_id, original, refreshed, *, source='verified_refresh'):
     """Update the current encrypted version only if no other writer replaced it.
 
     A stale IM connection or check must never overwrite a new QR login. Updating
@@ -64,7 +91,16 @@ def persist_refreshed_pc_cookies(db, account_id, original, refreshed):
     ).values(encrypted_cookies=encrypt_text(json.dumps(
         refreshed, ensure_ascii=False, separators=(',', ':')))),
         execution_options={'synchronize_session': False})
-    return result.rowcount == 1
+    if result.rowcount == 1:
+        account = db.get(PlatformAccount, account_id)
+        record_session_event(db, account, source, 'refreshed', cookie_version_id=row.id,
+                             changed_names=[k for k in set(original) | set(refreshed) if original.get(k) != refreshed.get(k)])
+        return True
+    return False
+
+
+# Compatibility for IM and PC consumers; the same CAS protection applies to Creator.
+persist_refreshed_pc_cookies = persist_refreshed_account_cookies
 
 
 def _first_present(*values: Any) -> Any:

@@ -633,36 +633,53 @@ def run_due_auto_tasks() -> None:
 
 
 def _check_single_account(db: Session, account: PlatformAccount, now: datetime) -> str:
-    """Check one account's cookie validity. Returns the new status."""
+    """Check and persist verified renewals; return the previous status."""
+    if account.status == 'disabled':
+        return account.status
     from backend.app.adapters.xhs.pc_login_adapter import XhsPcLoginAdapter
     from backend.app.adapters.xhs.creator_login_adapter import XhsCreatorLoginAdapter
-    from backend.app.services.account_service import decode_cookie_text
+    from backend.app.services.account_service import decode_cookie_text, persist_refreshed_account_cookies, record_session_event, cookie_version_is_current
+    from backend.app.services.account_health import AccountCheckError
 
     cookie_version = db.scalars(
         select(AccountCookieVersion)
         .where(AccountCookieVersion.platform_account_id == account.id)
         .order_by(AccountCookieVersion.created_at.desc())
     ).first()
+    old_status = account.status
     if cookie_version is None:
         account.status = "expired"
         account.status_message = "No stored cookie version"
         account.updated_at = now
-        return "expired"
+        record_session_event(db, account, 'scheduled_check', 'expired')
+        return old_status
 
     adapter = XhsCreatorLoginAdapter() if account.sub_type == "creator" else XhsPcLoginAdapter()
     try:
         cookies_text = decrypt_text(cookie_version.encrypted_cookies)
-        adapter.get_user_info(decode_cookie_text(cookies_text))
-        old_status = account.status
+        original = decode_cookie_text(cookies_text)
+        checked = dict(original)
+        info = (adapter.check_session(checked) if account.sub_type == 'creator' else adapter.get_user_info(checked))
+        if info.get('external_user_id') != account.external_user_id:
+            raise AccountCheckError('risk', '登录 Cookie 与绑定账号不一致，请重新检查所选账号')
+        if not persist_refreshed_account_cookies(db, account.id, original, checked, source='scheduled_check'):
+            record_session_event(db, account, 'scheduled_check', 'superseded', cookie_version_id=cookie_version.id)
+            return old_status
         account.status = "active"
         account.status_message = ""
         account.updated_at = now
+        record_session_event(db, account, 'scheduled_check', 'active', cookie_version_id=cookie_version.id)
         return old_status
     except Exception as exc:
-        old_status = account.status
-        account.status = "expired"
-        account.status_message = str(exc)
+        # A new login may have arrived while this network check was in flight.
+        if not cookie_version_is_current(db, account.id, cookie_version.id, cookie_version.encrypted_cookies):
+            record_session_event(db, account, 'scheduled_check', 'superseded', cookie_version_id=cookie_version.id)
+            return old_status
+        account.status = exc.account_status if isinstance(exc, AccountCheckError) else 'unknown'
+        account.status_message = str(exc) if isinstance(exc, AccountCheckError) else '账号检查暂未完成，请检查家庭网络后重试'
         account.updated_at = now
+        record_session_event(db, account, 'scheduled_check', account.status, cookie_version_id=cookie_version.id,
+                             business_code=getattr(exc, 'business_code', None))
         return old_status
 
 
@@ -671,19 +688,19 @@ def check_all_account_cookies_once() -> None:
     db = SessionLocal()
     try:
         now = shanghai_now()
-        accounts = db.scalars(select(PlatformAccount).order_by(PlatformAccount.id.asc())).all()
+        accounts = db.scalars(select(PlatformAccount).where(PlatformAccount.status != 'disabled').order_by(PlatformAccount.id.asc())).all()
         checked = 0
         newly_expired = 0
         for account in accounts:
             try:
                 old_status = _check_single_account(db, account, now)
                 checked += 1
-                if account.status == "expired" and old_status != "expired":
+                if account.status in ('expired', 'risk') and old_status != account.status:
                     newly_expired += 1
                     db.add(Notification(
                         user_id=account.user_id,
-                        title="账号 Cookie 过期",
-                        body=f"账号「{account.nickname or account.external_user_id or account.id}」({account.sub_type or 'pc'}) Cookie 已失效，请重新绑定。",
+                        title="账号登录需要处理",
+                        body=f"账号「{account.nickname or account.external_user_id or account.id}」({account.sub_type or 'pc'})：{account.status_message}",
                         level="warning",
                     ))
             except Exception as exc:
@@ -728,7 +745,8 @@ def build_due_publish_scheduler(interval_seconds: int, job_func, monitoring_job_
     scheduler.add_job(
         check_all_account_cookies_once,
         "interval",
-        hours=2,
+        minutes=30,
+        next_run_time=datetime.now(scheduler.timezone),
         id="cookie_health_checker",
         replace_existing=True,
         max_instances=1,

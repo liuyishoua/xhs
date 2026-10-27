@@ -15,7 +15,7 @@ from backend.app.services import dm_history, dm_media
 from backend.app.models.direct_message import DmMedia
 from backend.app.services import xhs_network
 from backend.app.models.direct_message import DmConversation
-from backend.app.services.model_routing import default_config, PROVIDER, validate_route
+from backend.app.services.model_routing import default_config, PROVIDER, validate_route, channel_client, agent_choices, resolve_agent, account_default
 
 router = APIRouter(prefix='/xhs/direct-messages', tags=['xhs-direct-messages'])
 
@@ -24,6 +24,7 @@ class ListenerRequest(BaseModel):
     enabled: bool
     auto_reply: bool = False
     route_id: str = Field(default='', max_length=80)
+    agent_id: str = Field(default='', max_length=80)
     control_mode: Literal['request_approval', 'auto_approve', 'full_access'] | None = None
 
 
@@ -64,6 +65,21 @@ def listeners(user: User = Depends(get_current_user), db: Session = Depends(get_
     return {'items': [{**listener_view(row), 'conversation_holds': list(holds.get(row.account_id, {}).values())} for row in rows]}
 
 
+@router.get('/agents')
+def agents(account_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    account = owned_account(db, user, account_id)
+    from backend.app.services.channel_client import ChannelError
+    try:
+        catalog = channel_client().catalog()
+        try:
+            default_id = account_default(catalog, 'dm', account)[1]['id']
+        except HTTPException:
+            default_id = ''
+        return {'connected': catalog.get('connected', True), 'agents': agent_choices(catalog, 'dm', account), 'default_agent_id': default_id}
+    except ChannelError as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
 @router.put('/listeners/{account_id}')
 def configure(account_id: int, data: ListenerRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     account = owned_account(db, user, account_id)
@@ -71,11 +87,13 @@ def configure(account_id: int, data: ListenerRequest, user: User = Depends(get_c
     if data.enabled:
         if not account.external_user_id:
             raise HTTPException(400, '请先重新绑定 PC 账号以取得用户 ID')
-        config = default_config(db, user.id, 'dm')
-        route_id = data.route_id or (config.model_name if config and config.provider == PROVIDER else '')
-        if not route_id:
-            raise HTTPException(400, '请先在模型配置选择私信回复路由')
-        validate_route(route_id, 'dm')
+        from backend.app.services.channel_client import ChannelError
+        try:
+            catalog = channel_client().catalog()
+            route, snapshot = (resolve_agent(catalog, 'dm', account, data.agent_id, data.route_id) if data.agent_id or data.route_id else account_default(catalog, 'dm', account))
+        except ChannelError as exc:
+            raise HTTPException(503, str(exc)) from None
+        route_id = route['id']
     else:
         route_id = row.route_id if row else ''
     if row is None:
@@ -88,6 +106,8 @@ def configure(account_id: int, data: ListenerRequest, user: User = Depends(get_c
     if data.control_mode is not None:
         row.control_mode = data.control_mode
     row.route_id = route_id
+    if data.enabled:
+        row.agent_snapshot = snapshot
     row.state = 'connecting' if data.enabled else 'stopping'
     row.error = ''
     db.commit()
@@ -130,11 +150,12 @@ def history(account_id: int, peer_id: str = Query(min_length=1, max_length=128),
             user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     owned_account(db, user, account_id)
     now = shanghai_now()
-    rows = dm_history.history_rows(db, account_id, peer_id, now - timedelta(hours=48), now)
+    rows = dm_history.history_rows(db, account_id, peer_id, now - timedelta(hours=dm_history.HISTORY_WINDOW_HOURS), now)
     record = db.scalar(select(DmConversation).where(DmConversation.account_id == account_id,
         DmConversation.peer_id == peer_id))
     return dict(items=[dm_history.view(m) for m in rows],
-        history=record.history_status if record else {}, analysis=record.analysis if record else {})
+        history={**(record.history_status if record else {}), 'window_hours': dm_history.HISTORY_WINDOW_HOURS},
+        analysis=record.analysis if record else {})
 
 
 @router.post('/{message_id}/reanalyze')

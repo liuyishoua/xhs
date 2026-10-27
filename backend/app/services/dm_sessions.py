@@ -6,6 +6,7 @@ Persist synchronization versions before I/O so a lost response is safe to retry.
 import hashlib
 import json
 from datetime import datetime
+from sqlalchemy import select
 from backend.app.core.time import SHANGHAI_TZ
 from backend.app.services import dm_history as history
 
@@ -49,6 +50,25 @@ def prepare(db, row, client):
             ledger[key] = old
         if not old.get('acknowledged'):
             changes.append({**entry, 'revision':old['revision']})
+    # A canonical re-read can identify a transport placeholder that older code
+    # synced as an outbound message. Tombstone only that ledger entry; preserve
+    # the old immutable snapshot and the local audit row.
+    placeholders = db.scalars(select(history.DmHistory).where(
+        history.DmHistory.account_id == row.account_id,
+        history.DmHistory.peer_id == row.peer_id, history.DmHistory.source == 'placeholder'))
+    for message in placeholders:
+        key = 'xhs-history:' + str(message.id)
+        old = ledger.get(key)
+        if not old:
+            continue
+        entry = dict(message_id=key, direction=message.direction, text=message.text,
+                     sent_at=old['sent_at'], media=[], revoked=True)
+        fingerprint = hashlib.sha256(json.dumps(entry,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+        if old.get('digest') != fingerprint:
+            old = dict(digest=fingerprint, revision=old['revision']+1, sent_at=old['sent_at'], acknowledged=False)
+            ledger[key] = old
+        if not old.get('acknowledged'):
+            changes.append({**entry, 'revision':old['revision']})
     state['messages'] = ledger
     conversation.session_state = json.loads(json.dumps(state))
     db.commit()  # Intention is durable before any remote write.
@@ -62,7 +82,8 @@ def prepare(db, row, client):
         conversation.session_state = json.loads(json.dumps({**state,'messages':ledger}))
         db.commit()
     snapshot = client.session_snapshot(account_id,state['id'],row.channel_payload['message_id'],
-        ['xhs-history:'+str(trigger_id)], reanalysis=bool((row.receipt or {}).get('analysis_attempts')))
+        ['xhs-history:'+str(trigger_id)], window_hours=history.HISTORY_WINDOW_HOURS,
+        reanalysis=bool((row.receipt or {}).get('analysis_attempts')))
     row.receipt = {**(row.receipt or {}),'session_snapshot':{
         k:snapshot[k] for k in ('id','session_id','revision','memory_revision','eligible','reason','context_bytes')}}
     if not snapshot['eligible']:
@@ -78,6 +99,13 @@ def prepare(db, row, client):
     row.channel_payload = {**row.channel_payload, 'session_snapshot_id':snapshot['id'], 'context':context}
     from backend.app.services.dm_service import DM_INSTRUCTION, CONTROL_INSTRUCTIONS
     row.channel_payload['text'] = DM_INSTRUCTION.replace('当前用户消息：','当前用户消息见会话快照：') + CONTROL_INSTRUCTIONS[context['control_mode']]
+    # This goal is stored by the authenticated owner, never read from peer text.
+    goal = state.get('reply_goal')
+    if isinstance(goal, dict) and goal.get('status') == 'active':
+        instruction = goal.get('instruction')
+        if isinstance(instruction, str) and 0 < len(instruction.strip()) <= 2000:
+            row.channel_payload['context']['owner_goal'] = {'instruction': instruction.strip()}
+            row.channel_payload['text'] += '\n账号主人对此会话的要求：' + instruction.strip()
     db.commit()
     return True
 

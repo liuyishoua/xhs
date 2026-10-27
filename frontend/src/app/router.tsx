@@ -1,48 +1,71 @@
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { Suspense, useEffect } from "react";
+import { Spin } from "antd";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 
+import { pages } from "./lazy-pages";
 import { AppShell } from "../components/layout/app-shell";
 import { ComingSoonPage } from "../components/platforms/coming-soon";
-import { ProtectedRoute, PublicOnlyRoute } from "../components/ui/protected-route";
-import { LoginPage } from "../pages/login/login-page";
-import { ModelConfigPage } from "../pages/models/model-config-page";
-import { PlatformSelectPage } from "../pages/platform-select/platform-select-page";
-import { DirectMessagesPage } from "../pages/platforms/xhs/direct-messages-page";
-import { TaskCenterPage } from "../pages/tasks/task-center-page";
-import { AutoOpsPage } from "../pages/platforms/xhs/auto-ops-page";
-import { XhsAccountsPage } from "../pages/platforms/xhs/accounts-page";
-import { XhsAnalyticsPage } from "../pages/platforms/xhs/analytics-page";
-import { XhsBenchmarksPage } from "../pages/platforms/xhs/benchmarks-page";
-import { XhsDashboard } from "../pages/platforms/xhs/xhs-dashboard";
-import { XhsCrawlerPage } from "../pages/platforms/xhs/crawler-page";
-import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
-import { XhsDraftsPage } from "../pages/platforms/xhs/rewrite-page";
-import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
-import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
-import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
-import { XhsImageStudioPage } from "../pages/platforms/xhs/image-studio-page";
-import { XhsPublishPage } from "../pages/platforms/xhs/publish-page";
-import { XhsVideoStudioPage } from "../pages/platforms/xhs/video-studio-page";
-import { XhsSectionPage } from "../pages/platforms/xhs/xhs-section-page";
+import { ProtectedRoute } from "../components/ui/protected-route";
+const ModelConfigPage = pages.ModelConfigPage.Component;
+const CommentsPage = pages.CommentsPage.Component;
+const ProactivePage = pages.ProactivePage.Component;
+const DirectMessagesPage = pages.DirectMessagesPage.Component;
+const XhsChatPage = pages.XhsChatPage.Component;
+const TaskCenterPage = pages.TaskCenterPage.Component;
+const AutoOpsPage = pages.AutoOpsPage.Component;
+const XhsAccountsPage = pages.XhsAccountsPage.Component;
+const XhsAnalyticsPage = pages.XhsAnalyticsPage.Component;
+const XhsBenchmarksPage = pages.XhsBenchmarksPage.Component;
+const XhsDashboard = pages.XhsDashboard.Component;
+const XhsCrawlerPage = pages.XhsCrawlerPage.Component;
+const XhsDiscoveryPage = pages.XhsDiscoveryPage.Component;
+const XhsDraftsPage = pages.XhsDraftsPage.Component;
+const XhsKeywordsPage = pages.XhsKeywordsPage.Component;
+const XhsLibraryPage = pages.XhsLibraryPage.Component;
+const XhsMonitoringPage = pages.XhsMonitoringPage.Component;
+const XhsImageStudioPage = pages.XhsImageStudioPage.Component;
+const XhsPublishPage = pages.XhsPublishPage.Component;
+const XhsVideoStudioPage = pages.XhsVideoStudioPage.Component;
+const XhsSectionPage = pages.XhsSectionPage.Component;
+
+function HubRedirect({ login = false }: { login?: boolean }) {
+  useEffect(() => { window.location.replace('https://d.58nft.net:9461/platform-select' + (login ? '?open=xhs' : window.location.search)); }, [login]);
+  return null;
+}
+
+function PageTitle() {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    document.title = pathname.startsWith("/platforms/xhs")
+      ? "小红书工作台"
+      : pathname === "/login"
+        ? "登录 · 运营应用中心"
+        : pathname === "/models"
+          ? "模型配置 · 运营应用中心"
+          : pathname === "/tasks"
+            ? "任务中心 · 运营应用中心"
+            : "运营应用中心";
+  }, [pathname]);
+  return null;
+}
 
 export function AppRouter() {
   return (
     <BrowserRouter>
+      <PageTitle />
+      <Suspense fallback={<div style={{ padding: 32 }}><Spin tip="正在加载页面" /></div>}>
       <Routes>
-        <Route path="/" element={<Navigate to="/platform-select" replace />} />
+        <Route path="/" element={<Navigate to="/platforms/xhs/dashboard" replace />} />
         <Route
           path="/login"
           element={
-            <PublicOnlyRoute>
-              <LoginPage />
-            </PublicOnlyRoute>
+            <HubRedirect login />
           }
         />
         <Route
           path="/platform-select"
           element={
-            <ProtectedRoute>
-              <PlatformSelectPage />
-            </ProtectedRoute>
+            <HubRedirect />
           }
         />
         <Route
@@ -60,7 +83,10 @@ export function AppRouter() {
             </ProtectedRoute>
           }
         >
+          <Route path="/platforms/xhs/comments" element={<CommentsPage />} />
+          <Route path="/platforms/xhs/proactive" element={<ProactivePage />} />
           <Route path="/platforms/xhs/messages" element={<DirectMessagesPage />} />
+          <Route path="/platforms/xhs/chat" element={<XhsChatPage />} />
           <Route path="/platforms/xhs/dashboard" element={<XhsDashboard />} />
           <Route path="/platforms/xhs/accounts" element={<XhsAccountsPage />} />
           <Route path="/platforms/xhs/analytics" element={<XhsAnalyticsPage />} />
@@ -80,6 +106,7 @@ export function AppRouter() {
           <Route path="/settings" element={<Navigate to="/models" replace />} />
         </Route>
       </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

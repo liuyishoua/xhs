@@ -1,15 +1,16 @@
+import { usePageVisible } from '../../../hooks/use-page-visible';
 import { CloudOutlined, MessageOutlined, ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Card, Col, Drawer, Empty, Popconfirm, Row, Select, Space, Spin, Switch, Table, Tag, Typography, Image } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { PageHeader } from '../../../components/layout/app-shell';
-import { fetchDmMedia, approveDirectMessage, checkXhsNetwork, configureDmListener, fetchAccounts, fetchDirectMessages, fetchDmHistory, fetchDmListeners, fetchModelRouting, fetchXhsNetwork, reanalyzeDirectMessage, resolveDirectMessage } from '../../../lib/api';
-import type { DmMediaRef, DirectMessageRecord, DmControlMode, DmHistoryResult, DmListener, ModelRouting, XhsNetworkStatus } from '../../../lib/api';
+import { readAccountSelection, saveAccountSelection, fetchDmAgents, fetchDmMedia, approveDirectMessage, checkXhsNetwork, configureDmListener, fetchAccounts, fetchDirectMessages, fetchDmHistory, fetchDmListeners, fetchXhsNetwork, reanalyzeDirectMessage, resolveDirectMessage } from '../../../lib/api';
+import type { AgentChoice, DmMediaRef, DirectMessageRecord, DmControlMode, DmHistoryResult, DmListener, XhsNetworkStatus } from '../../../lib/api';
 import type { PlatformAccount } from '../../../types';
 import { formatShanghaiTime } from '../../../lib/time';
 
 const states: Record<string, [string, string]> = {
-  history_pending: ['同步两天聊天', 'blue'], history_error: ['历史同步重试中', 'orange'],
+  history_pending: ['同步一天聊天', 'blue'], history_error: ['历史同步重试中', 'orange'],
   approval_pending: ['待批准发送', 'gold'],
   queued: ['待分析', 'default'], waiting: ['正在判断回复', 'blue'], ready: ['待发送', 'cyan'],
   sending: ['发送中', 'blue'], sent: ['平台已接收', 'blue'], uncertain: ['发送待核对', 'orange'],
@@ -43,15 +44,17 @@ function MediaPreview({ accountId, media }: { accountId: number; media: DmMediaR
 }
 
 export function DirectMessagesPage() {
+  const isPageVisible = usePageVisible();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [listeners, setListeners] = useState<DmListener[]>([]);
-  const [routing, setRouting] = useState<ModelRouting | null>(null);
   const [network, setNetwork] = useState<XhsNetworkStatus>();
   const [networkBusy, setNetworkBusy] = useState(false);
   const [accountId, setAccountId] = useState<number>();
   const activeAccount = useRef(accountId);
   activeAccount.current = accountId;
-  const [routeId, setRouteId] = useState('');
+  const [agentId, setAgentId] = useState('');
+  const [agents, setAgents] = useState<AgentChoice[]>([]);
+  const [agentsConnected, setAgentsConnected] = useState(false);
   const [automatic, setAutomatic] = useState(false);
   const [controlMode, setControlMode] = useState<DmControlMode>('auto_approve');
   const [rows, setRows] = useState<DirectMessageRecord[]>([]);
@@ -65,12 +68,13 @@ export function DirectMessagesPage() {
   const historyRequest = useRef(0);
   const listener = listeners.find(item => item.account_id === accountId);
   const waitingForReconnect = listener?.state === 'network_paused' && network?.state === 'online';
-  const routes = (routing?.routes || []).filter(r => (routing?.choices.dm || []).includes(r.id));
-  async function refresh(id = accountId, signal?: AbortSignal) {
+
+  async function refresh(id = accountId, signal?: AbortSignal, reloadAgents = false) {
     const request = ++refreshRequest.current;
-    const [current, currentNetwork, messages] = await Promise.allSettled([
+    const [current, currentNetwork, messages, directory] = await Promise.allSettled([
       fetchDmListeners(signal), fetchXhsNetwork(signal),
       id ? fetchDirectMessages(id, signal) : Promise.resolve({ items: [] as DirectMessageRecord[] }),
+      reloadAgents && id ? fetchDmAgents(id, signal) : Promise.resolve(null),
     ]);
     if (signal?.aborted || activeAccount.current !== id || request !== refreshRequest.current) return;
     const failed: string[] = [];
@@ -80,26 +84,43 @@ export function DirectMessagesPage() {
     else failed.push('网络状态');
     if (messages.status === 'fulfilled') { if (id) setRows(messages.value.items); }
     else failed.push('消息记录');
+    if (directory.status === 'fulfilled' && directory.value) { setAgents(directory.value.agents); setAgentsConnected(directory.value.connected); }
+    else if (directory.status === 'rejected') { setAgents([]); setAgentsConnected(false); failed.push('Agent 目录'); }
     setRefreshError(failed.length ? `${failed.join('、')}刷新失败，正在自动重试；相关内容保留上次结果。` : '');
   }
   useEffect(() => {
-    void Promise.all([fetchAccounts(), fetchDmListeners(), fetchModelRouting(), fetchXhsNetwork()]).then(([all, current, model, currentNetwork]) => {
+    void Promise.all([fetchAccounts(), fetchDmListeners(), fetchXhsNetwork()]).then(([all, current, currentNetwork]) => {
       const pc = all.filter(a => a.sub_type === 'pc');
-      setAccounts(pc); setListeners(current.items); setRouting(model);
-      setAccountId(pc.find(a => current.items.some(item => item.account_id === a.id && item.enabled))?.id || pc[0]?.id);
+      let saved: number | undefined;
+      try { saved = readAccountSelection('xhs_dm_account_id'); } catch { /* Browser storage may be unavailable. */ }
+      setAccounts(pc); setListeners(current.items);
+      setAccountId(selected => pc.find(a => a.id === selected)?.id || pc.find(a => a.id === saved)?.id
+        || pc.find(a => current.items.some(item => item.account_id === a.id && item.enabled))?.id || pc[0]?.id);
       setNetwork(currentNetwork);
     }).catch(() => setError('私信监听信息加载失败。'));
   }, []);
+  useEffect(() => {
+    if (accountId && accounts.some(a => a.id === accountId)) {
+      try { saveAccountSelection('xhs_dm_account_id', accountId); } catch { /* Keep the selection for this visit. */ }
+    }
+  }, [accountId, accounts]);
   useEffect(() => {
     const controller = new AbortController();
     setRows([]); setRefreshError('');
     setHistoryPeer(undefined); setChatHistory(undefined); historyRequest.current += 1;
     const current = listeners.find(item => item.account_id === accountId);
-    setRouteId(current?.route_id || routing?.bindings.dm || ''); setAutomatic(current?.auto_reply || false);
+    setAgentId(current?.agent_id || ''); setAutomatic(current?.auto_reply || false);
     setControlMode(current?.control_mode || 'auto_approve');
     if (!accountId) return () => controller.abort();
+    setAgents([]); setAgentsConnected(false);
+    void fetchDmAgents(accountId, controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      setAgents(result.agents); setAgentsConnected(result.connected);
+      if (!current?.agent_id) setAgentId(result.agents.find(a => a.route_id === current?.route_id)?.id || result.default_agent_id || '');
+    }).catch(() => { if (!controller.signal.aborted) setError('当前账号 Agent 列表读取失败，请刷新。'); });
     let timer: ReturnType<typeof setTimeout>;
     const update = async () => {
+      if (!isPageVisible()) { timer = setTimeout(update, 1000); return; }
       await refresh(accountId, controller.signal);
       if (!controller.signal.aborted) timer = setTimeout(update, 5000);
     };
@@ -112,9 +133,9 @@ export function DirectMessagesPage() {
     if (!accountId) return;
     setBusy(true); setError('');
     try {
-      await configureDmListener(accountId, { enabled, auto_reply: automatic, route_id: routeId, control_mode: controlMode });
+      await configureDmListener(accountId, { enabled, auto_reply: automatic, agent_id: agentId, control_mode: controlMode });
       await refresh();
-    } catch { setError('操作失败，请检查 PC 账号和私信回复路由。'); }
+    } catch { setError('操作失败，请检查 PC 账号和私信回复 Agent。'); }
     finally { setBusy(false); }
   }
   async function inspectNetwork() {
@@ -153,7 +174,7 @@ export function DirectMessagesPage() {
   }
   return <div>
     <PageHeader eyebrow="XHS · Channel · Multica" title="私信监听" description="读取文字、表情包和图片，结合聊天历史自主选择回复内容与形式。"
-      action={<Button icon={<ReloadOutlined />} onClick={() => void refresh().catch(() => setError('刷新失败。'))}>刷新记录</Button>} />
+      action={<Button icon={<ReloadOutlined />} onClick={() => void refresh(accountId, undefined, true).catch(() => setError('刷新失败。'))}>刷新记录</Button>} />
     {error && <Alert type="error" showIcon title={error} style={{ marginBottom: 16 }} />}
     {refreshError && <Alert type="warning" showIcon title={refreshError} style={{ marginBottom: 16 }} />}
     <Card title={<Space><CloudOutlined />小红书 PC 网络出口</Space>} style={{ marginBottom: 20 }}
@@ -194,25 +215,26 @@ export function DirectMessagesPage() {
           {waitingForReconnect ? <Alert type="info" title="家庭网络已恢复，监听连接正在重试；恢复监听后才处理消息。" style={{ marginTop: 16 }} /> : listener?.error && <Alert type="warning" title={listener.error} style={{ marginTop: 16 }} />}
         </Card></Col>
         <Col xs={24} lg={14}><Card title="回复方式" extra={<Link to="/models">模型配置</Link>}>
-          <Select aria-label="回复路由" placeholder="选择 Multica 回复路由" value={routeId || undefined} style={{ width: '100%', marginBottom: 16 }} onChange={setRouteId}
-            options={routes.map(r => ({ value: r.id, label: `${r.name} · ${r.agent?.name}` }))} />
+          <Select aria-label="回复 Agent" placeholder="选择当前账号 Agent" value={agentId || undefined} style={{ width: '100%', marginBottom: 16 }} onChange={setAgentId}
+            options={agents.map(a => ({ value: a.id, label: a.name }))} />
           <Typography.Paragraph strong style={{ marginBottom: 8 }}>控制方式</Typography.Paragraph>
           <Select aria-label="控制方式" value={controlMode} onChange={setControlMode} style={{ width: '100%', marginBottom: 8 }} options={Object.entries(controlModes).map(([value, item]) => ({ value, label: item.label }))} />
           <Typography.Paragraph type="secondary">{controlModes[controlMode].description}</Typography.Paragraph>
           <Space wrap style={{ marginBottom: 16 }}><Switch checked={automatic} onChange={setAutomatic} aria-label="自动回复" /><Typography.Text>{controlMode === 'request_approval' ? '批准后发送给原私信用户' : '自动发送回复给原私信用户'}</Typography.Text></Space>
           <div><Space wrap>
-            <Button type="primary" loading={busy} disabled={!routeId || !routing?.connected} onClick={() => void configure(true)}>{listener?.enabled ? '应用回复配置' : '开始监听'}</Button>
+            <Button type="primary" loading={busy} disabled={!agentId || !agentsConnected || !agents.some(a => a.id === agentId)} onClick={() => void configure(true)}>{listener?.enabled ? '应用回复配置' : '开始监听'}</Button>
             <Button loading={busy} disabled={!listener?.enabled} onClick={() => void configure(false)}>停止监听</Button>
           </Space></div>
         </Card></Col>
       </Row>
-      <Alert type="info" showIcon title="结合最近两天聊天，自主判断是否回复" style={{ marginBottom: 20 }} description="收到一对一文字、表情或图片后，同步双方最近 48 小时的聊天，结合意图、语气和聊天进展生成回复。连续消息合并判断，模型可以选择不回复。按账号配置的控制方式发送，批准只对当前这条回复及素材有效。表情包和图片会以真实图像传给模型，动态图片采样首、中、末帧；每轮最多读取 8 份最近素材。历史消息只作为上下文；发送结果不确定时暂停该用户的后续回复，核对后继续。" />
+      <Alert type="info" showIcon title="结合最近一天聊天，自主判断是否回复" style={{ marginBottom: 20 }} description="收到一对一文字、表情或图片后，同步双方最近 24 小时的聊天，结合意图、语气和聊天进展生成回复。连续消息合并判断，模型可以选择不回复。按账号配置的控制方式发送，批准只对当前这条回复及素材有效。表情包和图片会以真实图像传给模型，动态图片采样首、中、末帧；每轮最多读取 8 份最近素材。历史消息只作为上下文；发送结果不确定时暂停该用户的后续回复，核对后继续。" />
       <Card title="消息与回复记录" extra={<Typography.Text type="secondary">每 5 秒刷新 · 最近 100 条</Typography.Text>}>
         <Typography.Paragraph type="secondary">“平台已接收”表示小红书返回成功回执，尚未确认对方手机显示或已读。</Typography.Paragraph>
         <Table<DirectMessageRecord> rowKey="id" dataSource={rows} scroll={{ x: 900 }} pagination={{ pageSize: 10 }} locale={{ emptyText: '暂无新私信。开始监听后，新消息会显示在这里。' }} columns={[
-          { title: '私信用户', dataIndex: 'peer_id', width: 160, render: (value, row) => <Space orientation="vertical"><Typography.Text copyable>{value}</Typography.Text><Button size="small" onClick={() => void showHistory(value)}>查看两天聊天{Number.isFinite(row.history?.total_messages) ? ` · ${row.history?.total_messages} 条` : ''}</Button>{row.history?.context_truncated && <Tag>模型使用最近部分，完整记录已保存</Tag>}</Space> },
+          { title: '执行 Agent', width: 180, render: (_, row) => row.agent_snapshot?.name || '历史未记录' },
+          { title: '私信用户', dataIndex: 'peer_id', width: 160, render: (value, row) => <Space orientation="vertical"><Typography.Text copyable>{value}</Typography.Text><Link to={`/platforms/xhs/chat?account_id=${row.account_id}&peer_id=${encodeURIComponent(value)}`}>打开聊天</Link><Button size="small" onClick={() => void showHistory(value)}>查看一天聊天{Number.isFinite(row.history?.total_messages) ? ` · ${row.history?.total_messages} 条` : ''}</Button>{row.history?.context_truncated && <Tag>模型使用最近部分，完整记录已保存</Tag>}</Space> },
           { title: '收到的消息', dataIndex: 'text', width: 230, render: (value, row) => <div><Typography.Paragraph ellipsis={{ rows: 3, expandable: true }}>{value}</Typography.Paragraph>{row.media?.map(media => <MediaPreview key={media.asset_id} accountId={row.account_id} media={media} />)}</div> },
-          { title: '模型回复', dataIndex: 'reply_text', width: 260, render: (value, row) => <div>{row.reply_messages?.length ? row.reply_messages.map((reply, index) => <div key={index} style={{ borderLeft: '2px solid #eee', paddingLeft: 8, marginBottom: 8 }}><Typography.Text type="secondary">{index + 1} · {({ pending: '待发送', sending: '发送中', sent: '平台已接收', failed: '发送失败', uncertain: '待核对' } as Record<string, string>)[reply.status] || reply.status}{reply.status === 'pending' && ['superseded', 'skipped', 'sent', 'failed', 'uncertain'].includes(row.state) ? ' · 后续已停止' : ''}</Typography.Text>{!reply.media?.length && <Typography.Paragraph style={{ marginBottom: 4 }}>{reply.text}</Typography.Paragraph>}{reply.media?.map(media => <MediaPreview key={media.asset_id} accountId={row.account_id} media={media} />)}</div>) : <>{value ? <Typography.Paragraph ellipsis={{ rows: 3, expandable: true }}>{value}</Typography.Paragraph> : '—'}{row.reply_message?.media?.map(media => <MediaPreview key={media.asset_id} accountId={row.account_id} media={media} />)}</>}{row.analysis?.summary && <Typography.Paragraph type="secondary" ellipsis={{ rows: 2, expandable: true }}>{row.analysis.summary}</Typography.Paragraph>}</div> },
+          { title: '模型回复', dataIndex: 'reply_text', width: 260, render: (value, row) => <div>{row.reply_messages?.length ? row.reply_messages.map((reply, index) => <div key={index} style={{ borderLeft: '2px solid var(--ui-line,#eee)', paddingLeft: 8, marginBottom: 8 }}><Typography.Text type="secondary">{index + 1} · {({ pending: '待发送', sending: '发送中', sent: '平台已接收', failed: '发送失败', uncertain: '待核对' } as Record<string, string>)[reply.status] || reply.status}{reply.status === 'pending' && ['superseded', 'skipped', 'sent', 'failed', 'uncertain'].includes(row.state) ? ' · 后续已停止' : ''}</Typography.Text>{!reply.media?.length && <Typography.Paragraph style={{ marginBottom: 4 }}>{reply.text}</Typography.Paragraph>}{reply.media?.map(media => <MediaPreview key={media.asset_id} accountId={row.account_id} media={media} />)}</div>) : <>{value ? <Typography.Paragraph ellipsis={{ rows: 3, expandable: true }}>{value}</Typography.Paragraph> : '—'}{row.reply_message?.media?.map(media => <MediaPreview key={media.asset_id} accountId={row.account_id} media={media} />)}</>}{row.analysis?.summary && <Typography.Paragraph type="secondary" ellipsis={{ rows: 2, expandable: true }}>{row.analysis.summary}</Typography.Paragraph>}</div> },
           { title: '状态', width: 180, render: (_, row) => <Space orientation="vertical"><Tag color={states[row.state]?.[1]}>{row.state === 'sent' && row.receipt.manually_resolved === 'confirmed_sent' ? '已人工核对送达' : states[row.state]?.[0] || row.state}</Tag>{row.receipt.network && <Tag>{row.receipt.network.label}</Tag>}{row.error && <Typography.Text type="secondary">{row.error}</Typography.Text>}</Space> },
           { title: '时间', dataIndex: 'created_at', width: 170, render: formatShanghaiTime },
           { title: '处理', width: 160, render: (_, row) => <Space orientation="vertical">
@@ -225,7 +247,7 @@ export function DirectMessagesPage() {
         ]} />
       </Card>
     </>}
-    <Drawer title="最近两天的双向聊天" open={Boolean(historyPeer)} onClose={() => { setHistoryPeer(undefined); historyRequest.current += 1; }} styles={{ wrapper: { width: 'min(560px, 100vw)' } }}>
+    <Drawer title="最近一天的双向聊天" open={Boolean(historyPeer)} onClose={() => { setHistoryPeer(undefined); historyRequest.current += 1; }} styles={{ wrapper: { width: 'min(560px, 100vw)' } }}>
       <Spin spinning={historyBusy}>
         <Typography.Paragraph type="secondary">{historyPeer}</Typography.Paragraph>
         {chatHistory?.analysis && <Card size="small" title="当前聊天判断" style={{ marginBottom: 20 }}>

@@ -43,12 +43,24 @@ sudo systemctl restart xhs-web.service
 
 在途发送缺少匹配成功回执，继续进入 `uncertain` 并阻塞同一会话，不能因网络恢复自动重发。暂停的会话及原因会固定显示在监听页顶部，可以核对接收端或跳过旧回复恢复。
 
-每次重连先分页读取平台单人会话列表，再补收最近两天内、启用监听以后且晚于该会话最后已接收消息的文字。已接收的稳定消息 ID 去重，自己的消息、撤回和非文字内容不触发回复。补收完成后再启动实时读取和模型调度，让连续消息按时间顺序入队并由最新消息合并判断。会话列表和历史各自限定最多 30 页；无法完整读取时暂停并重试，不把不完整历史当作成功。该机制覆盖正常断线和服务切换期间的新会话消息，不追补超过两天的中断。
+每次重连先读取会话摘要，与 SQL 中的同步时间和消息序号比对，跳过未变化的历史会话，只补收最近一天内、启用监听以后且晚于该会话最后已接收消息的文字。已接收的稳定消息 ID 去重，自己的消息、撤回和非文字内容不触发回复。补收期间保持实时读取；有待处理消息的会话优先补收，每个会话历史完整后独立进入模型调度，不等待其他会话。连续消息按时间顺序入队并由最新消息合并判断。会话列表和历史各自限定最多 30 页；无法完整读取时暂停并重试，不把不完整历史当作成功。该机制覆盖正常断线和服务切换期间的新会话消息，不追补超过一天的中断。
 
-重新回复前仍同步两天历史，并按既有规则合并新消息、重新判断过期草稿。手机未收到的旧回复保留审计记录，不批量补发或改成已送达。
+重新回复前仍同步一天历史，并按既有规则合并新消息、重新判断过期草稿。手机未收到的旧回复保留审计记录，不批量补发或改成已送达。
 
 ## 验证
 
 自动测试覆盖错误配置拒绝连接、出站检测失败无直连重试、平台限制/恢复、过期健康观察暂停队列、PC/IM 认证共用代理、本地真实 SOCKS 握手验证 WebSocket 使用远端 DNS，以及断线补收、去重、启用时间边界、旧历史/撤回/非文字过滤和会话暂停状态展示。前端构建及真实账号家庭网络收发测试另行记录在 `.local/dm-delivery-diagnosis.json`。
 
 WebSocket 使用 [aiohttp-socks 的 ProxyConnector](https://github.com/romis2012/aiohttp-socks)；保持 SDK HTTP 与 WebSocket 的出口一致。
+
+## 小红书独立使用 Wi-Fi，保留 Mac 的工作代理
+
+Mac mini 的系统 HTTP、HTTPS、SOCKS 代理和 Clash 工作配置保持用户设置。小红书连接不能通过开关整个 Wi-Fi 的系统代理来修复。
+
+Mac 运行 `home_wifi_socks.py`，仅监听 `127.0.0.1:18891`。服务器原有的 `127.0.0.1:18890` 改由 SSH `-L` 转发到该端口；业务端仍显式使用原来的 SOCKS 地址。Mac 脚本直接创建 DNS/TCP socket，不读取系统代理、环境代理或调用 Clash。出站 socket 同时绑定 Wi-Fi 地址和 macOS `IP_BOUND_IF`；DNS 通过相同 Wi-Fi 网卡向 DHCP 下发的家庭 DNS 请求 IPv4 地址。网卡地址和 DNS 每次建立连接时重新获取。Wi-Fi 不可用则请求失败，不降级到服务器、其他网卡或工作代理。IPv6 SOCKS 目标不支持；现有业务按域名请求，由家庭 DNS 解析 IPv4。
+
+部署文件：`deploy/home_wifi_socks.py`、`deploy/xhs-home-egress.plist`、`deploy/xhs-home-tunnel.service`。当前 Mac 的 Wi-Fi 为 `en1`；迁移设备先用 `networksetup -listallhardwareports` 核对接口名，再改 plist 的 `--interface` 参数。脚本放在 `/Users/leo/.local/share/xhs-home-egress/`，plist 放在 `/Users/leo/Library/LaunchAgents/`，通过 `launchctl bootstrap gui/$(id -u)` 启用；该 LaunchAgent 在用户登录后保持运行。服务只接收本机 CONNECT，请求不能访问家庭私有地址，同时最多 32 个连接；不保存平台 Cookie。
+
+安装服务器 unit 后执行 `systemctl daemon-reload` 并仅重启 `xhs-home-tunnel`，无需重启业务、Hermes 或 Multica。验证时保持 Mac 工作代理开启，分别检查 Mac 的 `18891` 和服务器的 `18890` 可访问小红书，再运行业务家庭网络检测。若失败，先查 Mac helper 日志和 Wi-Fi，不关闭系统代理。原 unit 备份在 `.local/home-wifi-egress/xhs-home-tunnel.before.service`；回滚隧道时恢复该文件，卸载 helper 使用 `launchctl bootout`，不修改 Mac 的系统代理。
+
+检查：`PYTHONPATH=. .venv/bin/python -m pytest -q tests/backend/test_home_wifi_socks.py tests/backend/test_xhs_network.py`。实际验证只读网络和账号，不发送测试笔记或私信。

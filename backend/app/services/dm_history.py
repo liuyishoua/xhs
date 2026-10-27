@@ -1,4 +1,4 @@
-"""Account/peer isolated SQL history and immutable 48-hour model snapshots."""
+"""Account/peer isolated SQL history and immutable 24-hour model snapshots."""
 from datetime import datetime, timedelta
 import json
 from sqlalchemy import select
@@ -6,6 +6,8 @@ from backend.app.core.time import SHANGHAI_TZ, shanghai_now
 from backend.app.models.direct_message import DmHistory, DmConversation
 from backend.app.services.channel_client import compact_context
 from backend.app.services import dm_content, dm_media
+
+HISTORY_WINDOW_HOURS = 24
 
 
 class HistoryUnavailable(ValueError):
@@ -84,11 +86,27 @@ def save_message(db, account_id, peer_id, message_id, direction, text, sent_at,
     return row
 
 
+def empty_placeholder(raw):
+    """An explicit type-0 record with no content is not a chat bubble."""
+    if not isinstance(raw, dict) or raw.get('revoked'):
+        return False
+    body = raw.get('content')
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return False
+    return (isinstance(body, dict) and type(body.get('content_type')) is int
+            and body['content_type'] == 0 and body.get('content') == '')
+
+
 def parse_message(raw, own_id, peer_id):
     if not isinstance(raw, dict) or raw.get('group_chat') or raw.get('groupChat'):
         return None
     sender, receiver = raw.get('sender_id'), raw.get('receiver_id')
     if (sender, receiver) not in ((own_id, peer_id), (peer_id, own_id)):
+        return None
+    if empty_placeholder(raw):
         return None
     sent_at = timestamp(raw.get('created_at'))
     mid = raw.get('id')
@@ -110,9 +128,34 @@ def parse_message(raw, own_id, peer_id):
         text=text, content_type=kind, sent_at=sent_at, revoked=revoked, media=media)
 
 
-def sync_history(db, account, peer_id, fetch_page, now=None):
+def sync_history(db, account, peer_id, fetch_page, now=None, *, refresh_existing=False, reuse_if_covers=None, live_complete=False):
     now = now or shanghai_now()
-    since = now - timedelta(hours=48)
+    since = now - timedelta(hours=HISTORY_WINDOW_HOURS)
+    record = conversation(db, account.id, peer_id)
+    previous = dict(record.history_status or {})
+    anchor, anchor_id = None, None
+    if previous.get('complete') and not refresh_existing:
+        try:
+            old_since, old_until = (datetime.fromisoformat(previous[k]) for k in ('since', 'until'))
+            if old_since <= since <= old_until <= now:
+                anchor = old_until
+                anchor_id = previous.get('max_store_id')
+                # Only an active socket with completed recovery can extend
+                # coverage from the persisted bidirectional live history.
+                if live_complete:
+                    bounded = {**previous, 'since': since.isoformat(), 'until': now.isoformat(),
+                               'pages': 0, 'read_source': 'live_sql'}
+                    record.history_status = bounded
+                    db.commit()
+                    return bounded
+                if reuse_if_covers is not None and since <= reuse_if_covers <= anchor and now - anchor <= timedelta(seconds=30):
+                    bounded = {**previous, 'window_hours': HISTORY_WINDOW_HOURS, 'since': since.isoformat(), 'read_source':'sql_cache'}
+                    record.history_status = bounded
+                    db.commit()
+                    return bounded
+        except (KeyError, TypeError, ValueError):
+            pass
+    max_store_id = previous.get('max_store_id', 0) if anchor is not None else 0
     cursor, pages, completed = 0, 0, False
     for _ in range(30):
         data = fetch_page(peer_id, last_id=cursor, limit=100)
@@ -128,12 +171,27 @@ def sync_history(db, account, peer_id, fetch_page, now=None):
             break
         cursors, older = [], False
         for raw in raw_messages:
-            item = parse_message(raw, str(account.external_user_id), peer_id)
-            if item is None:
-                continue
-            store_id = raw.get('store_id')
+            # Pagination counts transport records, including empty placeholders.
+            store_id = raw.get('store_id') if isinstance(raw, dict) else None
             if isinstance(store_id, int) and store_id > 0:
                 cursors.append(store_id)
+                max_store_id = max(max_store_id or 0, store_id)
+                if anchor is not None and type(anchor_id) is int and store_id <= anchor_id:
+                    older = True
+            item = parse_message(raw, str(account.external_user_id), peer_id)
+            if item is None:
+                if empty_placeholder(raw) and (raw.get('sender_id'), raw.get('receiver_id')) in (
+                        (str(account.external_user_id), peer_id), (peer_id, str(account.external_user_id))):
+                    # Retain old misclassified rows for audit, but exclude them
+                    # from chat history and correct any previously synced ledger.
+                    previous_row = db.scalar(select(DmHistory).where(DmHistory.account_id == account.id,
+                        DmHistory.peer_id == peer_id, DmHistory.message_id == raw.get('id'),
+                        DmHistory.content_type == 0))
+                    if previous_row is not None:
+                        previous_row.source = 'placeholder'
+                continue
+            if anchor is not None and anchor_id is None and item['sent_at'] <= anchor:
+                older = True
             if item['sent_at'] < since:
                 older = True
                 continue
@@ -154,10 +212,9 @@ def sync_history(db, account, peer_id, fetch_page, now=None):
             raise HistoryUnavailable('聊天历史分页未向前推进，将自动重试')
         cursor = next_cursor
     if not completed:
-        raise HistoryUnavailable('最近两天消息超过本轮分页上限，已暂停自动回复，未使用不完整历史')
-    status = dict(window_hours=48, since=since.isoformat(), until=now.isoformat(),
-        synced_at=now.isoformat(), pages=pages, complete=True)
-    record = conversation(db, account.id, peer_id)
+        raise HistoryUnavailable('最近一天消息超过本轮分页上限，已暂停自动回复，未使用不完整历史')
+    status = {**previous, 'window_hours':HISTORY_WINDOW_HOURS,'since':since.isoformat(),'until':now.isoformat(),
+        'synced_at':now.isoformat(),'pages':pages,'complete':True,'max_store_id':max_store_id,'sync_requested':False,'read_source':'platform_sync'}
     record.history_status = status
     db.commit()
     return status
@@ -165,7 +222,8 @@ def sync_history(db, account, peer_id, fetch_page, now=None):
 
 def history_rows(db, account_id, peer_id, since, until):
     return list(db.scalars(select(DmHistory).where(DmHistory.account_id == account_id,
-        DmHistory.peer_id == peer_id, DmHistory.sent_at >= since, DmHistory.sent_at <= until)
+        DmHistory.peer_id == peer_id, DmHistory.sent_at >= since, DmHistory.sent_at <= until,
+        DmHistory.source != 'placeholder')
         .order_by(DmHistory.sent_at, DmHistory.id)))
 
 

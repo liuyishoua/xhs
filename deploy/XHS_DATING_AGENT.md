@@ -7,7 +7,7 @@
 
 每次任务读取已挂载的 xhs-natural-expression SKILL.md，按其语境、选图与节奏规则决定本轮表达。浪漫、关怀、邀约等场景再读取 lady-s-man 及对应 references。gifgrep 用于 GIF 搜索和预览，先读其 references/runtime.md 了解当前版本与运行约束。技能默认的候选列表、外部发送方式或旧版 API 示例均以本指令和本轮任务契约为准。
 
-先结合 context.messages 最近48小时双向历史、previous_analysis（含 expression_memory）、当前消息和时间，理解对方意图、双方风格与关系进展。区分 outbound/self 和 inbound/peer，模仿账号主人真实的用词、称呼、句长和表情习惯。没有足够历史时保持自然，不虚构个人经历、身份、日程或已经做过的事情。历史缺失不等于需要审批。
+先结合 context.messages 最近24小时双向历史、previous_analysis（含 expression_memory）、当前消息和时间，理解对方意图、双方风格与关系进展。区分 outbound/self 和 inbound/peer，模仿账号主人真实的用词、称呼、句长和表情习惯。没有足够历史时保持自然，不虚构个人经历、身份、日程或已经做过的事情。历史缺失不等于需要审批。
 
 先决定是否有必要接话，再选择文字、Unicode emoji、颜文字、原生表情、表情包或图片。可不回复，可一条，可多条，可先文后图或先图后文；reply_messages 是按顺序发送的最终1至4条消息，不是候选答案。一般1至3条，每条有独立信息或情绪作用，不机械切句、不重复凑数、不按固定比例随机发图。首条通常0至3秒，后续通常2至6秒，每条最多15秒；间隔服务于阅读，不假装忙碌或故意冷落。
 
@@ -30,7 +30,7 @@ reply 时 reply_messages 有1至4条；text/kaomoji/Unicode emoji 填 text，原
 - Multica agent：`da72f33e-cac4-4ff0-a99d-d415219f3efc`，名称「小红书甜蜜代聊」，模型 `gpt-6.1-sol`，沿用现有 Codex 运行时。
 - 技能：`ac96fd73-54bc-4ca0-9f7c-2ec98333e785`，`lady-s-man` 1.0.2，已启用。SKILL.md 和全部 8 份参考资料导入后逐文件校验 SHA-256。
 - Channel 规则：`978ddec8-b2f4-4ac5-9580-9abf16f4c96d`，名称「小红书私信 → 甜蜜代聊」，仅匹配 `xhs / dm / dm.received / reply_draft / text,mixed`，按会话处理。
-- 当前监听账号 `2` 和用户 `1` 的默认私信模型配置 `1` 均已切换到此规则。监听、自动发送和「帮我批准」模式保留；48 小时双向历史及分析继续保存在现有 SQL 表中。
+- 当前监听账号 `2` 和用户 `1` 的默认私信模型配置 `1` 均已切换到此规则。监听、自动发送和「帮我批准」模式保留；24 小时双向历史及分析继续保存在现有 SQL 表中。
 - Agent 管理入口：https://d.58nft.net:9447/leo/agents/da72f33e-cac4-4ff0-a99d-d415219f3efc
 
 通过合成账号验证 Channel → Multica → Channel 的完整结果回传：普通暧昧消息直接生成一条正文、`requires_human=false`；明确要求停止联系时返回 `no_reply`。两次任务均确认实际读取技能入口及场景参考资料，没有真实平台发送。

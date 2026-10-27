@@ -87,14 +87,22 @@ class XhsImConnection:
             raise ValueError('小红书聊天历史读取失败，请检查账号登录状态')
         return payload.get('data')
 
-    def recent_peers(self):
+    def recent_peers(self, checkpoints=None, since=None):
         from urllib.parse import urlencode
+        from backend.app.services.dm_history import timestamp, HISTORY_WINDOW_HOURS
+        from backend.app.core.time import SHANGHAI_TZ, shanghai_now
+        from datetime import datetime, timedelta
         peers, cursor, seen_chats = set(), None, 0
+        self.recent_chat_summaries = {}
+        self.history_refresh_peers = set()
+        self.chat_summary_pages = 0
+        cutoff = since or shanghai_now() - timedelta(hours=HISTORY_WINDOW_HOURS)
         for page in range(30):
             params = {'limit': 100, 'complete': 'true', 'page': page, 'source': 'pc'}
             if cursor is not None:
                 params['next_ts'] = cursor
             payload = self._signed_get('/api/im/web/v3/chats?' + urlencode(params)).json()
+            self.chat_summary_pages += 1
             data = payload.get('data') or {}
             chats = data.get('chats')
             if payload.get('success') is not True or not isinstance(chats, list):
@@ -103,6 +111,33 @@ class XhsImConnection:
             for chat in chats:
                 peer = chat.get('chat_user_id') if isinstance(chat, dict) else None
                 if isinstance(peer, str) and peer and len(peer) <= 128 and peer != self.expected_user_id:
+                    times = [timestamp(chat.get(k)) for k in ('last_msg_time', 'update_time')]
+                    activity = max((t for t in times if t is not None), default=None)
+                    max_id = chat.get('max_store_id')
+                    self.recent_chat_summaries[peer] = {'max_store_id': max_id,
+                        'update_time': chat.get('update_time'), 'last_msg_time': chat.get('last_msg_time')}
+                    info=chat.get('info') or {}
+                    for field in ('nickname','avatar'):
+                        value=info.get(field) or (info.get('user_name') if field=='nickname' else '')
+                        if isinstance(value,str):self.recent_chat_summaries[peer][field]=value[:500]
+                    if checkpoints is not None:
+                        cached = checkpoints.get(peer) or {}
+                        try:
+                            until = datetime.fromisoformat(cached['until']) if cached.get('complete') else None
+                            if until is not None and until.tzinfo is not None:
+                                until = until.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+                        except (KeyError, TypeError, ValueError):
+                            until = None
+                        cached_id = cached.get('max_store_id')
+                        advanced = type(max_id) is int and type(cached_id) is int and max_id > cached_id
+                        if activity is not None and activity < cutoff and not advanced:
+                            continue
+                        if until is not None and activity is not None and activity <= until and not advanced:
+                            continue
+                        if until is not None and activity is not None and activity > until and not advanced:
+                            # An edit/revocation can change a chat without adding
+                            # a new store ID. Refresh its retained history then.
+                            self.history_refresh_peers.add(peer)
                     peers.add(peer)
             total = data.get('total')
             if not chats or (isinstance(total, int) and seen_chats >= total):

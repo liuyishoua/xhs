@@ -9,6 +9,41 @@ from apis import xhs_creator_apis as sdk
 from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
 
 
+@pytest.mark.parametrize('current', [True, False])
+def test_publish_upload_risk_reports_recovery_only_for_current_login(monkeypatch, current):
+    from unittest.mock import Mock
+    from backend.app.api.publish import _record_upload_session_failure
+    from backend.app.services import account_service
+    from backend.app.services.account_health import CreatorUploadError
+    account = SimpleNamespace(id=4, status='active', status_message='')
+    persist = Mock(return_value=current)
+    report = Mock()
+    monkeypatch.setattr(account_service, 'persist_refreshed_account_cookies', persist)
+    monkeypatch.setattr(account_service, 'record_session_event', report)
+    error = CreatorUploadError({'business_code': 906, 'http_status': 401})
+    db = object()
+    _record_upload_session_failure(db, account, 'a1=synthetic', error)
+    persist.assert_called_once_with(db, 4, {'a1': 'synthetic'}, {'a1': 'synthetic'})
+    if current:
+        assert account.status == 'risk'
+        report.assert_called_once_with(db, account, 'creator_upload', 'risk', business_code=906)
+    else:
+        assert account.status == 'active'
+        report.assert_not_called()
+
+
+def test_publish_transport_failure_does_not_start_account_recovery(monkeypatch):
+    from unittest.mock import Mock
+    from backend.app.api.publish import _record_upload_session_failure
+    from backend.app.services import account_service
+    report = Mock()
+    monkeypatch.setattr(account_service, 'record_session_event', report)
+    account = SimpleNamespace(id=4, status='active')
+    _record_upload_session_failure(object(), account, 'a1=synthetic', TimeoutError('network'))
+    assert account.status == 'active'
+    report.assert_not_called()
+
+
 @pytest.fixture
 def upload_api(monkeypatch):
     api = object.__new__(sdk.XHS_Creator_Apis)
@@ -75,3 +110,36 @@ def test_transfer_timeout_is_not_reported_as_a_publish_failure(upload_api):
 def test_pasted_cookie_header_preserves_cookie_values(prefix):
     adapter = XhsCreatorApiAdapter(prefix + "gid=synthetic; a1=value:with:colon")
     assert adapter.cookies == "gid=synthetic; a1=value:with:colon"
+
+
+def test_risk_permit_reports_actual_failure_and_never_uploads(upload_api):
+    # Exercise the SDK implementation rather than the fixture's permit stub.
+    del upload_api.get_fileIds
+    upload_api.base_url = 'https://creator.xiaohongshu.com'
+    upload_api._request_params = lambda *a, **kw: ({'x-t': '1900000000000'}, {}, '')
+    upload_api.http = SimpleNamespace(
+        get=lambda *a, **kw: SimpleNamespace(status_code=401, json=lambda: {
+            'success': False, 'code': 906, 'msg': '账号存在风险，请重新登录', 'private': 'secret'}),
+        put=lambda *a, **kw: pytest.fail('risk rejection must not upload'))
+    ok, message, result = upload_api.upload_media(b'unused', 'image')
+    assert not ok and result is None
+    assert '906' in message and '重新登录' in message and '成功' not in message
+    assert upload_api.last_upload_failure == {'phase': 'permit', 'http_status': 401, 'business_code': 906}
+    assert 'secret' not in str(upload_api.last_upload_failure)
+
+
+def test_upload_adapter_preserves_risk_code_and_closes(monkeypatch):
+    from backend.app.services.account_health import CreatorUploadError
+    closed = []
+    api = SimpleNamespace(
+        upload_media=lambda *a: (False, 'misleading SDK message', None),
+        last_upload_failure={'phase': 'permit', 'http_status': 401, 'business_code': 906},
+        auth=SimpleNamespace(close=lambda: closed.append(True)))
+    adapter = XhsCreatorApiAdapter('a1=synthetic')
+    monkeypatch.setattr(adapter, '_api', lambda: api)
+    monkeypatch.setattr(adapter, '_resolve_file_data', lambda p: b'unused')
+    with pytest.raises(CreatorUploadError) as caught:
+        adapter.upload_media('image.jpg', 'image')
+    assert caught.value.account_error.account_status == 'risk'
+    assert caught.value.account_error.business_code == 906
+    assert closed == [True]

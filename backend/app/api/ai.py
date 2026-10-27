@@ -11,56 +11,60 @@ from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.security import decrypt_text
-from backend.app.models import AiDraft, AiGeneratedAsset, ModelConfig, Task, User
+from backend.app.models import AiDraft, AiGeneratedAsset, ModelConfig, PlatformAccount, Task, User
 from backend.app.schemas.common import paginated
 from backend.app.services.ai_service import ImageAiClient, OpenAICompatibleImageClient, OpenAICompatibleTextClient, TextAiClient
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
 
-class RewriteNoteRequest(BaseModel):
+class AccountRequest(BaseModel):
+    account_id: int | None = Field(default=None, gt=0)
+
+
+class RewriteNoteRequest(AccountRequest):
     draft_id: int
     instruction: str = Field(default="", max_length=800)
 
 
-class GenerateNoteRequest(BaseModel):
+class GenerateNoteRequest(AccountRequest):
     platform: Literal["xhs", "douyin", "kuaishou", "weibo", "xianyu", "taobao"] = "xhs"
     topic: str = Field(min_length=1, max_length=300)
     reference: str = Field(default="", max_length=4000)
     instruction: str = Field(default="", max_length=1000)
 
 
-class GenerateTitleRequest(BaseModel):
+class GenerateTitleRequest(AccountRequest):
     title: str = Field(default="", max_length=300)
     body: str = Field(min_length=1, max_length=6000)
     count: int = Field(default=5, ge=1, le=10)
 
 
-class GenerateTagsRequest(BaseModel):
+class GenerateTagsRequest(AccountRequest):
     title: str = Field(default="", max_length=300)
     body: str = Field(min_length=1, max_length=6000)
     count: int = Field(default=8, ge=1, le=20)
 
 
-class PolishTextRequest(BaseModel):
+class PolishTextRequest(AccountRequest):
     text: str = Field(min_length=1, max_length=6000)
     instruction: str = Field(default="", max_length=800)
 
 
-class GenerateCoverRequest(BaseModel):
+class GenerateCoverRequest(AccountRequest):
     prompt: str = Field(min_length=1, max_length=1200)
     draft_id: Optional[int] = None
     size: str = Field(default="1024x1024", max_length=32)
     style: str = Field(default="clean", max_length=120)
 
 
-class GenerateImageRequest(BaseModel):
+class GenerateImageRequest(AccountRequest):
     prompt: str = Field(min_length=1, max_length=2000)
     reference_images: list[str] = Field(default_factory=list)
     save_to_assets: bool = True
 
 
-class DescribeImageRequest(BaseModel):
+class DescribeImageRequest(AccountRequest):
     image_url: str = Field(min_length=1, max_length=4000)
     instruction: str = Field(default="", max_length=800)
 
@@ -90,6 +94,7 @@ def _get_default_text_model(db: Session, current_user: User) -> ModelConfig:
             ModelConfig.user_id == current_user.id,
             ModelConfig.model_type == "text",
             ModelConfig.is_default.is_(True),
+            ~ModelConfig.base_url.like("account:%"),
         )
     ).first()
     if config is None:
@@ -103,6 +108,7 @@ def _get_default_image_model(db: Session, current_user: User) -> ModelConfig:
             ModelConfig.user_id == current_user.id,
             ModelConfig.model_type == "image",
             ModelConfig.is_default.is_(True),
+            ~ModelConfig.base_url.like("account:%"),
         )
     ).first()
     if config is None:
@@ -110,14 +116,26 @@ def _get_default_image_model(db: Session, current_user: User) -> ModelConfig:
     return config
 
 
-def _text_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
-    model_config = _get_default_text_model(db, current_user)
+def _account_ai_model(db, user, purpose, account_id):
+    from backend.app.services.model_routing import ensure_account_config
+    from backend.app.services.channel_client import ChannelError
+    account = db.get(PlatformAccount, account_id)
+    if not account or account.user_id != user.id or account.platform != 'xhs' or account.sub_type != 'pc':
+        raise HTTPException(404, '小红书 PC 账号不存在')
+    try:
+        return ensure_account_config(db, account, purpose)
+    except ChannelError as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+def _text_model_context(db: Session, current_user: User, account_id=None) -> tuple[ModelConfig, str]:
+    model_config = _account_ai_model(db, current_user, 'text', account_id) if account_id else _get_default_text_model(db, current_user)
     api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
     return model_config, api_key
 
 
-def _image_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
-    model_config = _get_default_image_model(db, current_user)
+def _image_model_context(db: Session, current_user: User, account_id=None) -> tuple[ModelConfig, str]:
+    model_config = _account_ai_model(db, current_user, 'image', account_id) if account_id else _get_default_image_model(db, current_user)
     api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
     return model_config, api_key
 
@@ -132,6 +150,15 @@ def _serialize_generated_asset(asset: AiGeneratedAsset) -> dict[str, Any]:
         "file_path": asset.file_path,
         "created_at": asset.created_at.isoformat(),
     }
+
+
+def _task_agent_snapshot(db, user, purpose, config_id=None):
+    config = db.get(ModelConfig, config_id) if config_id else db.scalars(select(ModelConfig).where(ModelConfig.user_id == user.id,
+        ModelConfig.model_type == purpose, ModelConfig.is_default.is_(True))).first()
+    if config and config.provider == 'multica-channel':
+        return {**getattr(config, '_agent_snapshot', {}), 'name': config.name, 'route_id': config.model_name,
+                'account_binding': config.base_url if config.base_url.startswith('account:') else ''}
+    return {}
 
 
 def _recorded_text_task(
@@ -149,7 +176,7 @@ def _recorded_text_task(
         task_type=task_type,
         status="running",
         progress=10,
-        payload=payload,
+        payload={**payload, "agent_snapshot": _task_agent_snapshot(db, current_user, "text", payload.get("model_config_id"))},
     )
     db.add(task)
     db.flush()
@@ -187,7 +214,7 @@ def _recorded_image_task(
         task_type=task_type,
         status="running",
         progress=10,
-        payload=payload,
+        payload={**payload, "agent_snapshot": _task_agent_snapshot(db, current_user, "image", payload.get("model_config_id"))},
     )
     db.add(task)
     db.flush()
@@ -222,7 +249,7 @@ def rewrite_note(
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _text_model_context(db, current_user, payload.account_id)
     task, rewritten_body = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -251,7 +278,7 @@ def generate_note(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _text_model_context(db, current_user, payload.account_id)
     task, result = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -287,7 +314,7 @@ def generate_title(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _text_model_context(db, current_user, payload.account_id)
     task, items = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -314,7 +341,7 @@ def generate_tags(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _text_model_context(db, current_user, payload.account_id)
     task, items = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -341,7 +368,7 @@ def polish_text(
     db: Session = Depends(get_db),
     text_ai_client: TextAiClient = Depends(get_text_ai_client),
 ):
-    model_config, api_key = _text_model_context(db, current_user)
+    model_config, api_key = _text_model_context(db, current_user, payload.account_id)
     task, text = _recorded_text_task(
         db=db,
         current_user=current_user,
@@ -401,7 +428,7 @@ def generate_cover(
         if draft is None or draft.user_id != current_user.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
 
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _image_model_context(db, current_user, payload.account_id)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -438,7 +465,7 @@ def generate_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _image_model_context(db, current_user, payload.account_id)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
@@ -478,7 +505,7 @@ def describe_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _image_model_context(db, current_user, payload.account_id)
     task, text = _recorded_image_task(
         db=db,
         current_user=current_user,

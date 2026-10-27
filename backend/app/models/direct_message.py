@@ -9,9 +9,12 @@ class DmListener(Base):
     __tablename__ = 'xhs_dm_listeners'
     account_id: Mapped[int] = mapped_column(ForeignKey('platform_accounts.id'), primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    manual_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default='0')
+    chat_refresh_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default='0')
     auto_reply: Mapped[bool] = mapped_column(Boolean, default=False)
     control_mode: Mapped[str] = mapped_column(String(24), default='auto_approve', server_default='auto_approve')
     route_id: Mapped[str] = mapped_column(String(80), default='')
+    agent_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}')
     state: Mapped[str] = mapped_column(String(32), default='stopped')
     error: Mapped[str] = mapped_column(Text, default='')
     started_at: Mapped[object] = mapped_column(DateTime, default=shanghai_now)
@@ -85,3 +88,21 @@ class DmMedia(Base):
     channel_asset_id: Mapped[str] = mapped_column(String(100), default='')
     library: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[object] = mapped_column(DateTime, default=shanghai_now)
+
+
+class DmManualMessage(Base):
+    __tablename__ = 'xhs_dm_manual_messages'
+    __table_args__ = (UniqueConstraint('account_id', 'client_id', name='uq_xhs_manual_request'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey('platform_accounts.id'), index=True)
+    client_id: Mapped[str] = mapped_column(String(80))
+    external_user_id: Mapped[str] = mapped_column(String(128))
+    peer_id: Mapped[str] = mapped_column(String(128), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey('xhs_dm_media.id'), nullable=True)
+    outbound_mid: Mapped[str] = mapped_column(String(80))
+    state: Mapped[str] = mapped_column(String(24), default='queued')
+    receipt: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[object] = mapped_column(DateTime, default=shanghai_now)
+    updated_at: Mapped[object] = mapped_column(DateTime, default=shanghai_now, onupdate=shanghai_now)

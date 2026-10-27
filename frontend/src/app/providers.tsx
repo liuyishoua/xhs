@@ -15,6 +15,8 @@ export function useThemeMode() {
 }
 
 const darkTokens = {
+  colorLink: "#85baff", colorLinkHover: "#b8d8ff", colorLinkActive: "#85baff",
+  colorTextSecondary: "#aaaaaa", colorTextTertiary: "#aaaaaa", colorTextPlaceholder: "#aaaaaa",
   colorPrimary: "#1668dc",
   colorBgBase: "#141414",
   colorBgContainer: "#1f1f1f",
@@ -26,6 +28,8 @@ const darkTokens = {
 };
 
 const lightTokens = {
+  colorLink: "#1257b5", colorLinkHover: "#1668dc", colorLinkActive: "#1257b5",
+  colorTextSecondary: "#666666", colorTextTertiary: "#666666", colorTextPlaceholder: "#737373",
   colorPrimary: "#1668dc",
   colorBgBase: "#ffffff",
   colorBgContainer: "#ffffff",
@@ -38,14 +42,14 @@ const lightTokens = {
 
 const darkComponents = {
   Layout: { siderBg: "#141414", headerBg: "#141414", bodyBg: "#0a0a0a" },
-  Menu: { darkItemBg: "#141414", darkSubMenuItemBg: "#141414", darkItemSelectedBg: "#1668dc20", darkItemSelectedColor: "#1668dc" },
+  Menu: { darkItemBg: "#141414", darkSubMenuItemBg: "#141414", darkItemSelectedBg: "#1668dc20", darkItemSelectedColor: "#85baff" },
   Card: { colorBgContainer: "#1a1a1a" },
   Table: { colorBgContainer: "#1a1a1a", headerBg: "#1f1f1f" },
 };
 
 const lightComponents = {
   Layout: { siderBg: "#ffffff", headerBg: "#ffffff", bodyBg: "#f5f5f5" },
-  Menu: {},
+  Menu: { itemSelectedColor: "#1257b5", itemSelectedBg: "#eaf2ff", itemHoverColor: "#1257b5" },
   Card: {},
   Table: {},
 };
@@ -54,14 +58,24 @@ type AppProvidersProps = { children: ReactNode };
 
 export function AppProviders({ children }: AppProvidersProps) {
   const [mode, setMode] = useState<ThemeMode>(() => {
-    const saved = localStorage.getItem("theme-mode");
-    return saved === "light" ? "light" : "dark";
+    try { const saved = localStorage.getItem("workspace-theme") || localStorage.getItem("theme-mode"); return saved === "light" ? "light" : "dark"; }
+    catch { return "dark"; }
   });
 
   useEffect(() => {
-    localStorage.setItem("theme-mode", mode);
-    document.body.style.background = mode === "dark" ? "#141414" : "#f5f5f5";
+    try { localStorage.setItem("theme-mode", mode); localStorage.setItem("workspace-theme", mode); } catch { /* Optional preference storage. */ }
+    document.documentElement.dataset.workspaceTheme = mode;
+    document.documentElement.style.colorScheme = mode;
+    document.body.style.background = mode === "dark" ? "#0a0a0a" : "#f5f5f5";
   }, [mode]);
+
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key === 'theme-mode' || event.key === 'workspace-theme') setMode(event.newValue === 'light' ? 'light' : 'dark');
+    };
+    window.addEventListener('storage', changed);
+    return () => window.removeEventListener('storage', changed);
+  }, []);
 
   const toggle = () => setMode((m) => (m === "dark" ? "light" : "dark"));
   const isDark = mode === "dark";

@@ -22,7 +22,7 @@
 
 `history_pending → queued → waiting → ready → sending → sent`；请求批准模式在 ready 前增加 approval_pending。以绑定账号和稳定消息 ID 去重；Channel 提交载荷在网络调用前持久化，超时后使用原 ID、原内容重试。新文字私信使用原用户 ID 作为 conversation_id，附上 `surface=dm`、`event_type=dm.received` 和 `reply_draft` 类别。
 
-监听仅处理启用后的单人文字私信；自己的消息、其他接收账号、群聊和非文字消息不触发模型。WebSocket 断开自动退避重连，并补收最近两天内断线期间、启用时间以后且晚于会话最后接收消息的新文字，以稳定消息 ID 去重；启用前历史不触发回复。每个新消息仍读取该用户最近 48 小时双向历史作为上下文。私信协议隔离在 `im_protocol.py`，来自本机较新 xhs-spider 的已捕获实现；认证沿用本工程签名器，校验 Cookie 对应用户 ID，取得 RWP token 后连接。协议变化、过期 Cookie 和网络异常会显示连接状态，不模拟成功。
+监听仅处理启用后的单人文字私信；自己的消息、其他接收账号、群聊和非文字消息不触发模型。WebSocket 断开自动退避重连，并补收最近一天内断线期间、启用时间以后且晚于会话最后接收消息的新文字，以稳定消息 ID 去重；启用前历史不触发回复。每个新消息仍读取该用户最近 24 小时双向历史作为上下文。私信协议隔离在 `im_protocol.py`，来自本机较新 xhs-spider 的已捕获实现；认证沿用本工程签名器，校验 Cookie 对应用户 ID，取得 RWP token 后连接。协议变化、过期 Cookie 和网络异常会显示连接状态，不模拟成功。
 
 模型须返回 `{"reply_text":"回复正文","requires_human":false}` 才进入可发送状态。特殊事项在帮我批准模式进入 held；完全访问模式不等待人工，缺少合法结果不发送。缺少约定格式的结果进入 failed；Channel 的模型任务执行失败进入 failed。普通内容任务提取 Channel `structured.reply` 作为结果，保持原标题、正文、标签等入口格式。
 

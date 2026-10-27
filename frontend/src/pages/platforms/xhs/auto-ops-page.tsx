@@ -59,9 +59,9 @@ function getStatusTag(s: string) {
 }
 
 const panelStyle: React.CSSProperties = {
-  background: "#1a1a1a",
+  background: "var(--ui-surface,#1a1a1a)",
   borderRadius: 8,
-  border: "1px solid #303030",
+  border: "1px solid var(--ui-line,#303030)",
 };
 
 const cardBodyStyle: React.CSSProperties = {
@@ -291,13 +291,13 @@ export function AutoOpsPage() {
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
           <div style={{ textAlign: "center", padding: 48 }}>
             <Spin size="large" />
-            <Paragraph style={{ color: "#8c8c8c", marginTop: 16 }}>正在加载自动运营任务...</Paragraph>
+            <Paragraph style={{ color: "var(--ui-muted,#8c8c8c)", marginTop: 16 }}>正在加载自动运营任务...</Paragraph>
           </div>
         </Card>
       ) : tasks.length === 0 && !showCreate ? (
         <Card style={panelStyle} styles={{ body: cardBodyStyle }}>
           <Empty
-            image={<ThunderboltOutlined style={{ fontSize: 48, color: "#8c8c8c" }} />}
+            image={<ThunderboltOutlined style={{ fontSize: 48, color: "var(--ui-muted,#8c8c8c)" }} />}
             imageStyle={{ height: 64 }}
             description={
               <div>
@@ -316,7 +316,7 @@ export function AutoOpsPage() {
             <Col xs={24} md={12} xl={8} key={task.id}>
               <Card
                 style={panelStyle}
-                styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+                styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid var(--ui-line,#303030)" } }}
                 title={
                   <Space>
                     <ThunderboltOutlined style={{ color: task.status === "active" ? "#52c41a" : "#8c8c8c" }} />
@@ -347,7 +347,7 @@ export function AutoOpsPage() {
                     <Statistic
                       title="已发布"
                       value={task.total_published}
-                      valueStyle={{ fontSize: 20, color: "#e8e8e8" }}
+                      valueStyle={{ fontSize: 20, color: "var(--ui-muted,#e8e8e8)" }}
                     />
                   </Col>
                 </Row>
@@ -441,12 +441,12 @@ export function AutoOpsPage() {
         <Card
           title={
             <Space>
-              <CheckCircleOutlined style={{ color: "#52c41a" }} />
+              <CheckCircleOutlined style={{ color: "var(--ui-positive,#52c41a)" }} />
               <span>最近一次执行结果</span>
             </Space>
           }
           style={panelStyle}
-          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid var(--ui-line,#303030)" } }}
         >
           <Descriptions column={{ xs: 1, md: 2, lg: 4 }} size="small">
             <Descriptions.Item label="关键词">{lastRunResult.keyword}</Descriptions.Item>
@@ -481,7 +481,7 @@ export function AutoOpsPage() {
             </Space>
           }
           style={panelStyle}
-          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid #303030" } }}
+          styles={{ body: cardBodyStyle, header: { borderBottom: "1px solid var(--ui-line,#303030)" } }}
           extra={
             <Button type="text" onClick={() => setShowCreate(false)}>
               取消

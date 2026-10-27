@@ -18,7 +18,7 @@ export function ComingSoonPage() {
         alignItems: "center",
         justifyContent: "center",
         minHeight: "100vh",
-        background: "#0a0a0a",
+        background: "var(--ui-surface,#0a0a0a)",
       }}
     >
       <Result
@@ -34,7 +34,7 @@ export function ComingSoonPage() {
               justifyContent: "center",
               fontWeight: 800,
               fontSize: 36,
-              color: "#fff",
+              color: "var(--ui-on-primary,#fff)",
               margin: "0 auto 8px",
             }}
           >

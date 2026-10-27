@@ -37,4 +37,4 @@ __all__ = [
     "note_tags",
 ]
 
-from backend.app.models.direct_message import DmListener, DirectMessage, DmHistory, DmConversation, DmMedia
+from backend.app.models.direct_message import DmListener, DirectMessage, DmHistory, DmConversation, DmMedia, DmManualMessage

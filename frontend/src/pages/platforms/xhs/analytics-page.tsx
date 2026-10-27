@@ -205,14 +205,14 @@ export function XhsAnalyticsPage() {
             <Card
               size="small"
               style={{
-                background: "#1f1f1f",
-                borderColor: "#303030",
+                background: "var(--ui-surface,#1f1f1f)",
+                borderColor: "var(--ui-line,#303030)",
                 borderTop: `2px solid ${metricIconColors[idx]}`,
               }}
             >
               <Statistic
                 title={
-                  <span style={{ color: "#8c8c8c", fontSize: 13 }}>{metric.label}</span>
+                  <span style={{ color: "var(--ui-muted,#8c8c8c)", fontSize: 13 }}>{metric.label}</span>
                 }
                 value={metric.value}
                 prefix={
@@ -220,7 +220,7 @@ export function XhsAnalyticsPage() {
                     {metric.icon}
                   </span>
                 }
-                valueStyle={{ fontSize: 28, fontWeight: 600, color: "#e8e8e8" }}
+                valueStyle={{ fontSize: 28, fontWeight: 600, color: "var(--ui-muted,#e8e8e8)" }}
               />
             </Card>
           </Col>
@@ -259,12 +259,12 @@ export function XhsAnalyticsPage() {
               <Card
                 title={
                   <Space>
-                    <FireOutlined style={{ color: "#f5222d" }} />
+                    <FireOutlined style={{ color: "var(--ui-danger,#f5222d)" }} />
                     <span>高潜内容</span>
                   </Space>
                 }
                 extra={<Link to="/platforms/xhs/library">进入内容库</Link>}
-                style={{ background: "#1f1f1f", borderColor: "#303030", height: "100%" }}
+                style={{ background: "var(--ui-surface,#1f1f1f)", borderColor: "var(--ui-line,#303030)", height: "100%" }}
                 styles={{ body: { padding: "12px 16px" } }}
               >
                 <Table<AnalyticsTopContent>
@@ -285,14 +285,14 @@ export function XhsAnalyticsPage() {
                 <Card
                   title={
                     <Space>
-                      <TagsOutlined style={{ color: "#1668dc" }} />
+                      <TagsOutlined style={{ color: "var(--ui-accent,#1668dc)" }} />
                       <span>热点话题</span>
                     </Space>
                   }
                   extra={
                     <Tag color="blue">{hotTopics.length} 个</Tag>
                   }
-                  style={{ background: "#1f1f1f", borderColor: "#303030", flex: 1 }}
+                  style={{ background: "var(--ui-surface,#1f1f1f)", borderColor: "var(--ui-line,#303030)", flex: 1 }}
                   styles={{ body: { padding: "8px 16px", maxHeight: 320, overflowY: "auto" } }}
                 >
                   {hotTopics.length === 0 ? (
@@ -307,7 +307,7 @@ export function XhsAnalyticsPage() {
                           <List.Item style={{ padding: "8px 0", border: "none" }}>
                             <div style={{ width: "100%" }}>
                               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                                <Text style={{ color: "#e8e8e8", fontSize: 13 }}>#{topic.keyword}</Text>
+                                <Text style={{ color: "var(--ui-muted,#e8e8e8)", fontSize: 13 }}>#{topic.keyword}</Text>
                                 <Text type="secondary" style={{ fontSize: 12 }}>
                                   {topic.notes} 篇 / {formatNumber(topic.engagement)} 互动
                                 </Text>
@@ -331,7 +331,7 @@ export function XhsAnalyticsPage() {
                 <Card
                   title={
                     <Space>
-                      <CommentOutlined style={{ color: "#faad14" }} />
+                      <CommentOutlined style={{ color: "var(--ui-warning,#faad14)" }} />
                       <span>评论关键词</span>
                     </Space>
                   }
@@ -340,7 +340,7 @@ export function XhsAnalyticsPage() {
                       {commentInsights.question_count} 个提问
                     </Text>
                   }
-                  style={{ background: "#1f1f1f", borderColor: "#303030" }}
+                  style={{ background: "var(--ui-surface,#1f1f1f)", borderColor: "var(--ui-line,#303030)" }}
                   styles={{ body: { padding: "12px 16px" } }}
                 >
                   {commentInsights.top_terms.length === 0 ? (
@@ -373,20 +373,20 @@ export function XhsAnalyticsPage() {
             </Col>
           </Row>
 
-          <Divider style={{ borderColor: "#303030", margin: "24px 0" }} />
+          <Divider style={{ borderColor: "var(--ui-line,#303030)", margin: "24px 0" }} />
 
           {/* ---- Bottom: Top Comments ---- */}
           <Card
             title={
               <Space>
-                <CommentOutlined style={{ color: "#52c41a" }} />
+                <CommentOutlined style={{ color: "var(--ui-positive,#52c41a)" }} />
                 <span>高赞评论</span>
               </Space>
             }
             extra={
               <Tag>{commentInsights.top_comments.length} 条</Tag>
             }
-            style={{ background: "#1f1f1f", borderColor: "#303030" }}
+            style={{ background: "var(--ui-surface,#1f1f1f)", borderColor: "var(--ui-line,#303030)" }}
             styles={{ body: { padding: "8px 16px" } }}
           >
             <List
@@ -394,17 +394,17 @@ export function XhsAnalyticsPage() {
               locale={{ emptyText: "暂无已保存评论。" }}
               split={false}
               renderItem={(comment) => (
-                <List.Item style={{ padding: "10px 0", borderBottom: "1px solid #262626" }}>
+                <List.Item style={{ padding: "10px 0", borderBottom: "1px solid var(--ui-line,#262626)" }}>
                   <List.Item.Meta
                     avatar={
                       <Avatar
                         size={36}
                         icon={<UserOutlined />}
-                        style={{ backgroundColor: "#303030" }}
+                        style={{ backgroundColor: "var(--ui-surface,#303030)" }}
                       />
                     }
                     title={
-                      <Text style={{ color: "#d9d9d9", fontSize: 13 }}>{comment.content}</Text>
+                      <Text style={{ color: "var(--ui-muted,#d9d9d9)", fontSize: 13 }}>{comment.content}</Text>
                     }
                     description={
                       <Space size={16} style={{ marginTop: 2 }}>

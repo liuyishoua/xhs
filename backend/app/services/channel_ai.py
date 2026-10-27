@@ -9,9 +9,19 @@ from backend.app.core.config import get_settings
 from backend.app.services.model_routing import channel_client
 
 
-def complete(config, text, *, images=None, category='content_analysis'):
+def complete(config, text, *, images=None, category='content_analysis', account_id=None):
     client = channel_client()
     account = 'user:' + str(config.user_id)
+    if config.base_url and config.base_url.startswith('account:'):
+        from backend.app.core.database import SessionLocal
+        from backend.app.models import PlatformAccount
+        with SessionLocal() as db:
+            owner = db.get(PlatformAccount, int(config.base_url.removeprefix('account:')))
+            if not owner or owner.user_id != config.user_id or owner.platform != 'xhs':
+                raise ValueError('任务绑定的账号已不可用，请重新选择 Agent')
+            account = f'user:{owner.user_id}:account:{owner.external_user_id or owner.id}'
+    if account_id is not None:
+        account = str(account_id)
     assets = []
     for ref in images or []:
         if ref.startswith('data:image/') and ';base64,' in ref:
@@ -20,6 +30,8 @@ def complete(config, text, *, images=None, category='content_analysis'):
             name = unquote(ref.removeprefix('/api/files/media/'))
             if '/' in name or '\\' in name or name in ('', '.', '..'):
                 raise ValueError('图片路径无效')
+            if not name.startswith(tuple(f'xhs-{kind}-u{config.user_id}-' for kind in ('image', 'upload', 'asset'))):
+                raise ValueError('图片不属于当前用户')
             path = Path(get_settings().storage_dir) / 'media' / name
             if not path.is_file() or path.stat().st_size > 8 * 1024 * 1024:
                 raise ValueError('图片不存在或超过 8MB')

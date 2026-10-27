@@ -34,6 +34,15 @@ def _get_query_params(parsed_url):
     }
 
 
+def _comment_page_data(payload):
+    """An incomplete success envelope is not proof of an empty comment list."""
+    data = payload.get('data') if isinstance(payload, dict) else None
+    if (not isinstance(data, dict) or not isinstance(data.get('comments'), list)
+            or not isinstance(data.get('has_more'), bool)):
+        raise ValueError('评论响应缺少列表或分页信息，不能确认原帖可见性')
+    return data
+
+
 # RAP 白名单（浏览器实抓：需 x-rap-param）
 _RAP_PATH_MARKERS = (
     "api/sns/web/v1/homefeed",
@@ -713,7 +722,9 @@ class XHS_Apis():
             headers, cookies, data = self._request_params(splice_api, '', 'GET')
             response = self.http.get(self.base_url + splice_api, headers=headers, cookies=cookies, proxies=self._proxies(proxies), timeout=REQUEST_TIMEOUT)
             res_json = response.json()
-            success, msg = res_json["success"], res_json["msg"]
+            success, msg = res_json.get("success") is True, res_json.get("msg", "")
+            if success:
+                _comment_page_data(res_json)
         except Exception as e:
             success = False
             msg = _log_api_error(e)
@@ -726,20 +737,22 @@ class XHS_Apis():
             返回笔记的全部一级评论
         """
         cursor = ''
+        seen_cursors = {cursor}
         note_out_comment_list = []
         try:
             while True:
                 success, msg, res_json = self.get_note_out_comment(note_id, cursor, xsec_token, proxies)
                 if not success:
                     raise Exception(msg)
-                comments = res_json["data"]["comments"]
-                if 'cursor' in res_json["data"]:
-                    cursor = str(res_json["data"]["cursor"])
-                else:
+                data = _comment_page_data(res_json)
+                note_out_comment_list.extend(data['comments'])
+                if not data['has_more']:
                     break
-                note_out_comment_list.extend(comments)
-                if len(note_out_comment_list) == 0 or not res_json["data"]["has_more"]:
-                    break
+                next_cursor = str(data.get('cursor') or '')
+                if not next_cursor or next_cursor in seen_cursors:
+                    raise ValueError('评论分页游标未推进，读取未完成')
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
         except Exception as e:
             success = False
             msg = _log_api_error(e)
@@ -768,7 +781,9 @@ class XHS_Apis():
             headers, cookies, data = self._request_params(splice_api, '', 'GET')
             response = self.http.get(self.base_url + splice_api, headers=headers, cookies=cookies, proxies=self._proxies(proxies), timeout=REQUEST_TIMEOUT)
             res_json = response.json()
-            success, msg = res_json["success"], res_json["msg"]
+            success, msg = res_json.get("success") is True, res_json.get("msg", "")
+            if success:
+                _comment_page_data(res_json)
         except Exception as e:
             success = False
             msg = _log_api_error(e)
@@ -784,19 +799,21 @@ class XHS_Apis():
             if not comment['sub_comment_has_more']:
                 return True, 'success', comment
             cursor = comment['sub_comment_cursor']
+            seen_cursors = {str(cursor)}
             inner_comment_list = []
             while True:
                 success, msg, res_json = self.get_note_inner_comment(comment, cursor, xsec_token, proxies)
                 if not success:
                     raise Exception(msg)
-                comments = res_json["data"]["comments"]
-                if 'cursor' in res_json["data"]:
-                    cursor = str(res_json["data"]["cursor"])
-                else:
+                data = _comment_page_data(res_json)
+                inner_comment_list.extend(data['comments'])
+                if not data['has_more']:
                     break
-                inner_comment_list.extend(comments)
-                if not res_json["data"]["has_more"]:
-                    break
+                next_cursor = str(data.get('cursor') or '')
+                if not next_cursor or next_cursor in seen_cursors:
+                    raise ValueError('回复分页游标未推进，读取未完成')
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
             comment['sub_comments'].extend(inner_comment_list)
         except Exception as e:
             success = False

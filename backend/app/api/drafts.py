@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -33,6 +34,7 @@ class DraftUpdateRequest(BaseModel):
 
 
 class DraftSendToPublishRequest(BaseModel):
+    multica_issue_id: Optional[UUID] = None
     platform_account_id: Optional[int] = None
     publish_mode: str = Field(default="immediate", pattern="^(immediate|scheduled)$")
     scheduled_at: Optional[datetime] = None
@@ -50,6 +52,8 @@ def _clean_topics(topics: Optional[list[str]]) -> list[str]:
 
 def _build_publish_options(payload: DraftSendToPublishRequest) -> dict[str, Any]:
     options: dict[str, Any] = {}
+    if payload.multica_issue_id is not None:
+        options["multica_issue_id"] = str(payload.multica_issue_id)
     topics = _clean_topics(payload.topics)
     if topics:
         options["topics"] = topics
@@ -197,6 +201,13 @@ def send_draft_to_publish(
         account_id = account.id
 
     options = _build_publish_options(payload)
+    if payload.multica_issue_id is not None:
+        for existing in db.scalars(select(PublishJob).where(
+                PublishJob.user_id == current_user.id, PublishJob.platform == draft.platform)):
+            if json.loads(existing.publish_options or '{}').get('multica_issue_id') == str(payload.multica_issue_id):
+                if existing.platform_account_id != account_id:
+                    raise HTTPException(409, '该任务已绑定其他发布账号')
+                return _serialize_publish_job(existing)
     if draft.tags:
         options["draft_tags"] = draft.tags
 

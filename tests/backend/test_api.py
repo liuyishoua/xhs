@@ -1,4 +1,5 @@
 import os
+import pytest
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -341,6 +342,7 @@ def _parse_sse_response(response):
 def _override_database(tmp_path):
     from backend.app.core.database import Base, get_db
 
+    client.cookies.clear()
     engine = create_engine(f"sqlite:///{tmp_path / 'auth-test.db'}", connect_args={"check_same_thread": False})
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
@@ -730,7 +732,8 @@ def test_xhs_pc_qrcode_reports_adapter_failure_as_bad_gateway(tmp_path):
         )
 
         assert response.status_code == 502
-        assert "proxy refused" in response.json()["detail"]
+        assert "获取登录二维码失败" in response.json()["detail"]
+        assert "proxy refused" not in response.json()["detail"]
     finally:
         app.dependency_overrides.pop(db_dependency, None)
         app.dependency_overrides.pop(get_pc_login_adapter, None)
@@ -795,12 +798,25 @@ def test_xhs_pc_qrcode_login_can_optionally_sync_creator_account(tmp_path):
         app.dependency_overrides.pop(get_creator_login_adapter, None)
 
 
-def test_xhs_pc_phone_login_session_sends_code_and_confirms_account(tmp_path):
+@pytest.mark.parametrize("login_state", [None, {"private": "synthetic-signing-state"}])
+def test_xhs_pc_phone_login_session_sends_code_and_confirms_account(tmp_path, monkeypatch, login_state):
     from backend.app.api.login_sessions import get_creator_login_adapter, get_pc_login_adapter
     from backend.app.core.database import get_db
     from backend.app.core.security import decrypt_text
     from backend.app.models import LoginSession, PlatformAccount
 
+    original_send = FakePhoneLoginAdapter.create_phone_session
+    original_confirm = FakePhoneLoginAdapter.confirm_phone_login
+    def send(self, phone):
+        result = original_send(self, phone)
+        if login_state is not None:
+            result["pc_login_state"] = login_state
+        return result
+    def confirm(self, phone, code, cookies, **kwargs):
+        assert kwargs == ({"pc_login_state": login_state} if login_state is not None else {})
+        return original_confirm(self, phone, code, cookies)
+    monkeypatch.setattr(FakePhoneLoginAdapter, "create_phone_session", send)
+    monkeypatch.setattr(FakePhoneLoginAdapter, "confirm_phone_login", confirm)
     db_dependency = _override_database(tmp_path)
     app.dependency_overrides[get_pc_login_adapter] = lambda: FakePhoneLoginAdapter()
     app.dependency_overrides[get_creator_login_adapter] = lambda: FailingCreatorExchangeAdapter()
@@ -823,7 +839,13 @@ def test_xhs_pc_phone_login_session_sends_code_and_confirms_account(tmp_path):
             assert stored_session.sub_type == "pc"
             assert stored_session.login_method == "phone"
             assert stored_session.phone_mask == "138****8000"
-            assert decrypt_text(stored_session.encrypted_temp_cookies) == '{"a1":"phone-temp-a1"}'
+            decoded = decrypt_text(stored_session.encrypted_temp_cookies)
+            if login_state is None:
+                assert decoded == '{"a1":"phone-temp-a1"}'
+            else:
+                import json
+                assert json.loads(decoded)["pc_login_state"] == login_state
+                assert "synthetic-signing-state" not in send_response.text
         finally:
             db.close()
 
@@ -5834,7 +5856,7 @@ def test_image_utility_routes_require_authentication(tmp_path):
 
         assert compose_response.status_code == 401
         assert resize_response.status_code == 401
-        assert download_response.status_code == 404
+        assert download_response.status_code == 401
     finally:
         app.dependency_overrides.pop(db_dependency, None)
 
@@ -5906,7 +5928,7 @@ def test_image_utilities_compose_resize_download_and_enforce_scope(tmp_path):
         forbidden_download = client.get(
             composed["download_url"],
         )
-        assert forbidden_download.status_code == 200
+        assert forbidden_download.status_code == 404
 
         forbidden_resize = client.post(
             "/api/files/images/resize",
@@ -6352,7 +6374,9 @@ def test_due_publish_scheduler_registers_interval_job():
         assert job_intervals["due_publish_runner"] == 17
         assert job_intervals["monitoring_refresh_runner"] == 17
         assert job_intervals["auto_tasks_runner"] == 60
-        assert job_intervals["cookie_health_checker"] == 7200
+        assert job_intervals["cookie_health_checker"] == 1800
+        from datetime import timezone
+        assert scheduler.get_job('cookie_health_checker').next_run_time <= datetime.now(timezone.utc) + timedelta(seconds=5)
     finally:
         shutdown_due_publish_scheduler(scheduler)
 

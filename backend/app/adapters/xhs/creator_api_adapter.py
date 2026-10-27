@@ -11,6 +11,19 @@ class XhsCreatorApiAdapter:
         # A copied HTTP Cookie header may include its field name.
         cookies = cookies.strip()
         self.cookies = cookies[7:].lstrip() if cookies[:7].lower() == "cookie:" else cookies
+        self.refreshed_cookies = None
+
+    def check_upload_permission(self) -> None:
+        from backend.app.services.account_health import CreatorUploadError
+        with direct_xhs_request_env():
+            api = self._api()
+            try:
+                success, _, _ = api.get_fileIds('image')
+                if not success:
+                    raise CreatorUploadError(api.last_upload_failure or {})
+                self.refreshed_cookies = dict(api.auth.cookie_map)
+            finally:
+                api.auth.close()
 
     def _api(self):
         from apis.xhs_creator_apis import XHS_Creator_Apis
@@ -34,8 +47,18 @@ class XhsCreatorApiAdapter:
     def upload_media(self, file_path: str, media_type: str) -> dict[str, Any]:
         file_data = self._resolve_file_data(file_path)
         with direct_xhs_request_env():
-            success, message, payload = self._api().upload_media(file_data, media_type)
+            api = self._api()
+            try:
+                success, message, payload = api.upload_media(file_data, media_type)
+                failure = getattr(api, 'last_upload_failure', None)
+                if success:
+                    self.refreshed_cookies = dict(api.auth.cookie_map)
+            finally:
+                api.auth.close()
         if not success:
+            if failure:
+                from backend.app.services.account_health import CreatorUploadError
+                raise CreatorUploadError(failure)
             raise RuntimeError(message or "Creator media upload failed")
         return payload or {}
 

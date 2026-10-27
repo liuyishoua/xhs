@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
@@ -229,6 +229,44 @@ def _get_latest_account_cookies(db: Session, account_id: int) -> str:
     return _cookies_to_string(decrypt_text(cookie_version.encrypted_cookies))
 
 
+def _record_upload_session_failure(db, account, cookies, exc):
+    from backend.app.services.account_health import CreatorUploadError
+    from backend.app.services.account_service import (
+        decode_cookie_text, persist_refreshed_account_cookies, record_session_event,
+    )
+    if not isinstance(exc, CreatorUploadError):
+        return False
+    original = decode_cookie_text(cookies)
+    # A failed old request must not invalidate credentials saved by a new login.
+    if not persist_refreshed_account_cookies(db, account.id, original, original):
+        return False
+    failure = exc.account_error
+    account.status = failure.account_status
+    account.status_message = str(failure)
+    record_session_event(db, account, 'creator_upload', account.status,
+                         business_code=failure.business_code)
+    return True
+
+
+def _wait_for_publish_login(db, job, account, cookies, exc):
+    """Only an explicit publish attempt authorizes resuming this exact job."""
+    from backend.app.services.account_health import CreatorUploadError
+    if not isinstance(exc, CreatorUploadError):
+        return
+    # If a new login already won the credentials race, leave it intact and let
+    # the same authorized job resume against that verified session.
+    _record_upload_session_failure(db, account, cookies, exc)
+    options = _load_publish_options(job)
+    recovery = options.get('login_recovery') or {}
+    if exc.account_error.business_code not in (906, -100) or recovery.get('resume_attempts', 0):
+        job.status = 'failed'
+        return
+    options['login_recovery'] = {'external_id': account.external_user_id,
+        'account_id': account.id, 'user_id': job.user_id, 'resume_attempts': 0}
+    _store_publish_options(job, options)
+    job.status = 'waiting_login'
+
+
 def _record_publish_control_task(db: Session, current_user: User, job: PublishJob, task_type: str) -> None:
     task = Task(
         user_id=current_user.id,
@@ -280,6 +318,8 @@ def update_publish_job(
     db: Session = Depends(get_db),
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
+    if job.status in ('resuming', 'publishing', 'uploading'):
+        raise HTTPException(409, '发布处理中，请等待本轮完成再修改')
     if payload.platform_account_id is not None:
         account = db.get(PlatformAccount, payload.platform_account_id)
         if account is None or account.user_id != current_user.id or account.platform != job.platform:
@@ -327,7 +367,7 @@ def cancel_publish_job(
     db: Session = Depends(get_db),
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
-    if job.status not in {"pending", "scheduled"}:
+    if job.status not in {"pending", "scheduled", "waiting_login"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publish job cannot be cancelled")
 
     job.status = "cancelled"
@@ -344,7 +384,7 @@ def delete_publish_job(
     db: Session = Depends(get_db),
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
-    if job.status in {"publishing", "uploading"}:
+    if job.status in {"publishing", "uploading", "resuming"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="正在进行中的任务无法删除")
 
     db.execute(select(PublishAsset).where(PublishAsset.publish_job_id == job.id))
@@ -432,6 +472,7 @@ def upload_publish_asset(
     except Exception as exc:
         asset.upload_status = "failed"
         asset.upload_error = str(exc)
+        _record_upload_session_failure(db, account, cookies, exc)
         db.commit()
         db.refresh(asset)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=asset.upload_error)
@@ -452,7 +493,7 @@ def publish_job_to_creator(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     if account.platform != "xhs" or account.sub_type != "creator":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Creator account required")
-    if job.status in {"publishing", "published", "scheduled"}:
+    if job.status in {"publishing", "published", "scheduled", "uncertain"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publish job is already completed")
     if not job.title.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publish title is required")
@@ -482,6 +523,8 @@ def publish_job_to_creator(
             except Exception as exc:
                 asset.upload_status = "failed"
                 asset.upload_error = str(exc)[:500]
+                _wait_for_publish_login(db, job, account, cookies, exc)
+                job.publish_error = str(exc)[:500]
                 db.commit()
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
@@ -523,9 +566,14 @@ def publish_job_to_creator(
             "publish_mode": job.publish_mode,
         },
     )
+    claim = db.execute(update(PublishJob).where(
+        PublishJob.id == job.id,
+        PublishJob.status.not_in(("publishing", "published", "scheduled", "uncertain")),
+    ).values(status="publishing", publish_error=""))
+    if claim.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publish job is already claimed")
     db.add(task)
-    job.status = "publishing"
-    job.publish_error = ""
     db.commit()
 
     try:
@@ -545,7 +593,7 @@ def publish_job_to_creator(
         db.refresh(job)
         return serialize_publish_job(job)
     except Exception as exc:
-        job.status = "failed"
+        job.status = "failed" if isinstance(exc, RuntimeError) else "uncertain"
         job.publish_error = str(exc)
         task.status = "failed"
         task.progress = 100

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.leo.xhs-home-egress</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/leo/.local/share/xhs-home-egress/home_wifi_socks.py</string>
+		<string>--interface</string>
+		<string>en1</string>
+		<string>--port</string>
+		<string>18891</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/leo/.local/share/xhs-home-egress/stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leo/.local/share/xhs-home-egress/stdout.log</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leo/.local/share/xhs-home-egress</string>
+</dict>
+</plist>

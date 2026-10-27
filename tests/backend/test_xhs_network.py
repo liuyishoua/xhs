@@ -172,3 +172,30 @@ def test_recent_conversation_pagination_collects_new_peers_and_rejects_stalled_c
     assert 'page=0' in calls[0] and 'next_ts=100' in calls[1] and 'page=1' in calls[1]
     calls.clear();pages[1] = {'chats':[{'chat_user_id':'first'}], 'total':3, 'next_ts':100}
     with pytest.raises(ValueError, match='分页未推进'): connection.recent_peers()
+
+
+def test_reconnect_summary_skips_cached_and_inactive_chats_but_keeps_edits():
+    from backend.app.adapters.xhs.im_adapter import XhsImConnection
+    from backend.app.core.time import shanghai_now, SHANGHAI_TZ
+    from datetime import timedelta
+    now = shanghai_now()
+    def stamp(delta): return int((now-delta).replace(tzinfo=SHANGHAI_TZ).timestamp()*1000)
+    checkpoint = {'complete': True, 'until': (now-timedelta(minutes=1)).isoformat(), 'max_store_id': 5}
+    chats = [
+        {'chat_user_id':'unchanged','last_msg_time':stamp(timedelta(minutes=5)),'max_store_id':5},
+        {'chat_user_id':'inactive','last_msg_time':stamp(timedelta(days=3)),'max_store_id':2},
+        {'chat_user_id':'new','last_msg_time':stamp(timedelta(seconds=10)),'max_store_id':1},
+        {'chat_user_id':'changed','last_msg_time':stamp(timedelta(seconds=10)),'max_store_id':6},
+        {'chat_user_id':'edited','last_msg_time':stamp(timedelta(minutes=5)),
+         'update_time':stamp(timedelta(seconds=10)),'max_store_id':5},
+    ]
+    connection = object.__new__(XhsImConnection);connection.expected_user_id='own'
+    calls = []
+    def get(path):
+        calls.append(path)
+        return SimpleNamespace(json=lambda: {'success':True,'data':{'chats':chats,'total':len(chats)}})
+    connection._signed_get=get
+    checkpoints={key:checkpoint for key in ['unchanged','changed','edited']}
+    assert connection.recent_peers(checkpoints=checkpoints) == {'new','changed','edited'}
+    assert connection.history_refresh_peers == {'edited'}
+    assert len(calls)==1

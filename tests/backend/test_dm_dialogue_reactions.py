@@ -30,7 +30,7 @@ def db(tmp_path, monkeypatch):
 
 def row(db, text='哈哈这个真好笑'):
     item = DirectMessage(account_id=1, message_id='trigger', peer_id='peer', text=text, media=[],
-                         channel_payload={'account_id': 'synthetic-account'}, state='history_pending')
+                         channel_payload={'account_id': 'synthetic-account', 'route_id': ''}, state='history_pending')
     db.add(item); db.commit()
     dm.prepare_history(db, item, lambda *a, **kw: {'result': {'success': True}, 'out_message_list': []})
     return item

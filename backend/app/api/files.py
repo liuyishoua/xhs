@@ -147,13 +147,13 @@ def resize_image(payload: ResizeImageRequest, current_user: User = Depends(get_c
 
 
 @router.get("/media/{file_name}")
-def download_media(file_name: str):
-    if Path(file_name).name != file_name or ".." in file_name:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file not found")
+def download_media(file_name: str, current_user: User = Depends(get_current_user)):
+    _validate_owner_media_name(file_name, current_user)
     file_path = _media_dir() / file_name
     if not file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file not found")
-    return FileResponse(file_path, filename=file_name, media_type=_media_type(file_name))
+    return FileResponse(file_path, filename=file_name, media_type=_media_type(file_name),
+                        headers={'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
 
 
 @router.get("/exports/{file_name}")

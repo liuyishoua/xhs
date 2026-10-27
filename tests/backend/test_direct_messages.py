@@ -188,7 +188,7 @@ def test_listener_api_owner_isolation_and_resolution(api, database):
 
 def test_routing_binding_uses_channel_not_keys(api, database, monkeypatch):
     route = {'id': 'route-a', 'name': 'Multica reply', 'agent': {'name': 'Agent'}}
-    monkeypatch.setattr(model_routing, 'validate_route', lambda rid, purpose: route)
+    monkeypatch.setattr(model_routing, 'validate_route', lambda rid, purpose, *args: route)
     assert api.put('/api/model-routing/text', json={'route_id': 'route-a'}).status_code == 200
     assert api.put('/api/model-routing/unknown', json={'route_id': 'route-a'}).status_code == 404
     with database() as db:
@@ -245,7 +245,7 @@ def test_background_worker_full_synthetic_receive_channel_send_ack(database, mon
         async def heartbeat(self): pass
         def cookie_snapshot(self): return {'a1': 'synthetic', 'web_session': 'rotated'}
         history_page = staticmethod(empty_history)
-        recent_peers = staticmethod(lambda: [])
+        recent_peers = staticmethod(lambda **kwargs: [])
         async def send(self, peer, text, mid):
             sent.append((peer, text, mid))
             await self.queue.put({'decoded': {'im': {'chatACK': {'mid': mid, 'code': 0, 'msg': 'ok', 'messageid': 'acknowledged'}}}})
@@ -339,6 +339,54 @@ def history_message(mid, store_id, at, text='合成历史', sender='customer-a',
         content=json.dumps({'content': text, 'content_type': 1}), **kwargs)
 
 
+def test_empty_type_zero_placeholder_is_not_a_reply_but_pagination_advances(database):
+    from backend.app.services import dm_history
+    from backend.app.models.direct_message import DmHistory
+    now = shanghai_now()
+    stamp = now - timedelta(seconds=3)
+    placeholder = history_message('empty', 2, stamp + timedelta(milliseconds=2), sender='own', receiver='customer-a')
+    placeholder['content'] = json.dumps({'content_type': 0, 'content': '', 'front_chain': '[消息] 点击查看'})
+    assert dm_history.parse_message(placeholder, 'own', 'customer-a') is None
+    inbound = history_message('question', 1, stamp, '每天跑五公里吗？')
+    calls = []
+    def fetch(peer, last_id, limit):
+        calls.append(last_id)
+        return {'result': {'success': True}, 'out_message_list': [placeholder] if last_id == 0 else [inbound]}
+    with database() as db:
+        status = dm_history.sync_history(db, db.get(PlatformAccount, 1), 'customer-a', fetch, now)
+        assert status['complete'] and calls == [0, 2] and status['max_store_id'] == 2
+        rows = dm_history.history_rows(db, 1, 'customer-a', now-timedelta(days=1), now)
+        assert len(rows) == 1 and rows[0].direction == 'inbound'
+        # Unknown nonempty records remain conservative evidence of owner activity.
+        unknown = {**placeholder, 'content': json.dumps({'content_type': 0, 'content': '未知实际内容'})}
+        assert dm_history.parse_message(unknown, 'own', 'customer-a')['direction'] == 'outbound'
+        photo = {**placeholder, 'content': json.dumps({'content_type': 2, 'content': {'url': 'https://msg-img.xhscdn.com/example'}})}
+        assert dm_history.parse_message(photo, 'own', 'customer-a')['content_type'] == 2
+
+
+def test_reconnect_prioritizes_pending_conversation_and_limits_recovery_to_peer(database, monkeypatch):
+    from backend.app.services import dm_worker
+    monkeypatch.setattr(dm_worker, 'SessionLocal', database)
+    with database() as db:
+        accept(db, prepared=False)
+    assert dm_worker.reconnect_peers(1, ['aaa-old-peer', 'customer-a']) == ['customer-a', 'aaa-old-peer']
+    peers = []
+    def fetch(peer, **kwargs):
+        peers.append(peer)
+        return {'result': {'success': True}, 'out_message_list': []}
+    dm_worker.reconnect_history(1, fetch, ['aaa-old-peer'], only_peer='customer-a')
+    assert peers == ['customer-a']
+
+
+def test_reconnect_does_not_rescan_finished_local_conversations(database, monkeypatch):
+    from backend.app.services import dm_worker
+    monkeypatch.setattr(dm_worker, 'SessionLocal', database)
+    with database() as db:
+        row=accept(db);row.state='sent';db.commit()
+    assert dm_worker.reconnect_peers(1)==[]
+    assert dm_worker.reconnect_peers(1,['changed-peer'])==['changed-peer']
+
+
 def test_reconnect_recovers_only_new_inbound_text_after_enable_and_deduplicates(database, monkeypatch):
     from backend.app.services import dm_worker
     monkeypatch.setattr(dm_worker, 'SessionLocal', database)
@@ -347,7 +395,7 @@ def test_reconnect_recovers_only_new_inbound_text_after_enable_and_deduplicates(
         history_message('outbound', 4, now-timedelta(seconds=3), sender='own', receiver='customer-a'),
         history_message('first', 3, now-timedelta(seconds=4), '断线时第一条'),
         history_message('before-enable', 2, now-timedelta(minutes=2)),
-        history_message('old-history', 1, now-timedelta(hours=49))]
+        history_message('old-history', 1, now-timedelta(hours=25))]
     def fetch(peer, **kwargs):
         assert peer == 'customer-a'
         return {'result': {'success': True}, 'out_message_list': messages}
@@ -372,7 +420,7 @@ def test_reconnect_does_not_replay_older_missing_history_or_revoked_nontext(data
     revoked = history_message('revoked', 5, now-timedelta(seconds=2));revoked['revoked'] = True
     nontext = history_message('image', 4, now-timedelta(seconds=3));nontext['content'] = json.dumps({'content_type': 2})
     messages = [revoked, nontext, history_message('older-missing', 3, now-timedelta(seconds=10)),
-        history_message('ancient', 1, now-timedelta(hours=49))]
+        history_message('ancient', 1, now-timedelta(hours=25))]
     assert dm_worker.reconnect_history(1, lambda *a, **kw: {'result': {'success': True}, 'out_message_list': messages}) == 0
     with database() as db:
         assert len(list(db.scalars(select(DirectMessage)))) == 1
@@ -389,7 +437,7 @@ def test_listener_exposes_earliest_conversation_hold_and_clears_it_on_skip(datab
     assert api.get('/api/xhs/direct-messages/listeners').json()['items'][0]['conversation_holds'] == []
 
 
-def test_paged_bidirectional_48h_history_is_persisted_and_scoped(database, api):
+def test_paged_bidirectional_24h_history_is_persisted_and_scoped(database, api):
     from backend.app.services import dm_history
     from backend.app.models.direct_message import DmHistory
     now = shanghai_now()
@@ -399,8 +447,8 @@ def test_paged_bidirectional_48h_history_is_persisted_and_scoped(database, api):
             history_message('wrong', 7, now-timedelta(hours=2), sender='someone-else'),
             history_message('future', 6, now+timedelta(hours=1))],
         6: [history_message('self', 8, now-timedelta(hours=1), '我的历史话术', sender='own', receiver='customer-a'),
-            history_message('older', 5, now-timedelta(hours=47)),
-            history_message('expired', 4, now-timedelta(hours=49))],
+            history_message('older', 5, now-timedelta(hours=23)),
+            history_message('expired', 4, now-timedelta(hours=25))],
     }
     calls = []
     def fetch(peer, last_id, limit):
@@ -409,14 +457,78 @@ def test_paged_bidirectional_48h_history_is_persisted_and_scoped(database, api):
         return {'result': {'success': True}, 'out_message_list': pages[last_id]}
     with database() as db:
         status = dm_history.sync_history(db, db.get(PlatformAccount, 1), 'customer-a', fetch, now)
-        assert status['complete'] and calls == [0, 6]
-        rows = dm_history.history_rows(db, 1, 'customer-a', now-timedelta(hours=48), now)
+        assert status['complete'] and status['window_hours']==24 and calls == [0, 6]
+        rows = dm_history.history_rows(db, 1, 'customer-a', now-timedelta(hours=24), now)
         assert [r.message_id for r in rows] == ['older', 'self', 'new']
         assert rows[1].direction == 'outbound'
         assert db.scalars(select(DmHistory).where(DmHistory.account_id == 2)).all() == []
     response = api.get('/api/xhs/direct-messages/history?account_id=1&peer_id=customer-a').json()
     assert len(response['items']) == 3 and response['history']['complete']
     assert api.get('/api/xhs/direct-messages/history?account_id=2&peer_id=customer-a').status_code == 404
+
+
+def test_incremental_history_stops_at_cached_store_id_and_reuses_complete_snapshot(database):
+    from backend.app.services import dm_history
+    now=shanghai_now()
+    old=history_message('old',3,now-timedelta(hours=1))
+    expired=history_message('expired',2,now-timedelta(hours=25))
+    new=history_message('new',4,now-timedelta(minutes=1))
+    calls=[]
+    with database() as db:
+        account=db.get(PlatformAccount,1)
+        dm_history.sync_history(db,account,'customer-a',lambda *a,**kw:
+            {'result':{'success':True},'out_message_list':[old,expired]},now-timedelta(minutes=5))
+        def fetch(peer,**kwargs):
+            calls.append(kwargs['last_id'])
+            assert kwargs['last_id']==0, 'cached older pages must not be fetched'
+            return {'result':{'success':True},'out_message_list':[new,old]}
+        status=dm_history.sync_history(db,account,'customer-a',fetch,now)
+        assert status['complete'] and status['max_store_id']==4 and calls==[0]
+        assert [r.message_id for r in dm_history.history_rows(db,1,'customer-a',now-timedelta(hours=24),now)]==['old','new']
+        dm_history.sync_history(db,account,'customer-a',lambda *a,**kw:pytest.fail('duplicate immediate fetch'),
+            now+timedelta(seconds=10),reuse_if_covers=now-timedelta(minutes=1))
+
+
+def test_previous_two_day_cache_is_reused_as_one_day_context(database, api):
+    from backend.app.services import dm_history
+    now=shanghai_now()
+    with database() as db:
+        account=db.get(PlatformAccount,1)
+        for mid,age in [('recent',1),('previous-day',30)]:
+            dm_history.save_message(db,1,'customer-a',mid,'inbound',mid,now-timedelta(hours=age))
+        record=dm_history.conversation(db,1,'customer-a')
+        record.history_status={'complete':True,'window_hours':48,'since':(now-timedelta(hours=48)).isoformat(),
+            'until':(now-timedelta(seconds=10)).isoformat(),'max_store_id':2}
+        db.commit()
+        status=dm_history.sync_history(db,account,'customer-a',lambda *a,**kw:pytest.fail('cache covers this message'),
+            now,reuse_if_covers=now-timedelta(hours=1))
+        assert status['window_hours']==24 and status['since']==(now-timedelta(hours=24)).isoformat()
+    result=api.get('/api/xhs/direct-messages/history?account_id=1&peer_id=customer-a').json()
+    assert [m['message_id'] for m in result['items']]==['recent']
+    assert result['history']['window_hours']==24
+
+
+def test_edit_refresh_and_missing_cache_coverage_do_not_use_incremental_shortcut(database):
+    from backend.app.services import dm_history
+    now=shanghai_now();old=history_message('old',3,now-timedelta(hours=1));new=history_message('new',4,now-timedelta(minutes=1))
+    expired=history_message('expired',2,now-timedelta(hours=25))
+    with database() as db:
+        account=db.get(PlatformAccount,1)
+        dm_history.sync_history(db,account,'customer-a',lambda *a,**kw:
+            {'result':{'success':True},'out_message_list':[old,expired]},now-timedelta(minutes=5))
+        old['revoked']=True
+        calls=[]
+        def fetch(peer,**kwargs):
+            calls.append(kwargs['last_id'])
+            return {'result':{'success':True},'out_message_list':[new] if kwargs['last_id']==0 else [old,expired]}
+        dm_history.sync_history(db,account,'customer-a',fetch,now,refresh_existing=True)
+        assert calls==[0,4]
+        assert dm_history.history_rows(db,1,'customer-a',now-timedelta(hours=24),now)[0].revoked
+        record=dm_history.conversation(db,1,'customer-a')
+        record.history_status={**record.history_status,'since':(now-timedelta(hours=12)).isoformat()};db.commit()
+        calls.clear()
+        dm_history.sync_history(db,account,'customer-a',fetch,now+timedelta(seconds=1))
+        assert calls==[0,4], 'incomplete 24-hour coverage must be repaired'
 
 
 def test_history_snapshot_uses_full_sql_but_bounded_model_context(database):
@@ -612,7 +724,7 @@ def test_control_mode_change_reanalyzes_pending_draft_under_new_policy(database,
 
 
 def test_listener_control_mode_validation_and_owner_isolation(api, database, monkeypatch):
-    monkeypatch.setattr(direct_messages, 'validate_route', lambda *args: {})
+    monkeypatch.setattr(direct_messages, 'channel_client', lambda: SimpleNamespace(catalog=lambda: {'routes': [{'id': 'route-a', 'name': 'Agent', 'agent': {'id': 'account-agent', 'name': 'Agent'}, 'account_ids': ['1'], 'categories': ['reply_draft'], 'surfaces': ['dm'], 'event_types': ['dm.received'], 'kinds': ['text']}]}))
     data={'enabled': True, 'auto_reply': True, 'route_id': 'route-a', 'control_mode': 'full_access'}
     assert api.put('/api/xhs/direct-messages/listeners/1', json=data).json()['control_mode'] == 'full_access'
     data['control_mode'] = 'unsafe-arbitrary-mode'

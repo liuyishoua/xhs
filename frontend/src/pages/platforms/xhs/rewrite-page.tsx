@@ -41,6 +41,7 @@ import {
   Popconfirm,
   Row,
   Segmented,
+  Select,
   Space,
   Spin,
   Tabs,
@@ -57,6 +58,9 @@ import {
   addDraftAsset,
   deleteDraft,
   deleteDraftAsset,
+  fetchAccounts,
+  getXhsAiAccount,
+  setXhsAiAccount,
   fetchDraftAssets,
   fetchDrafts,
   fetchGeneratedImageAssets,
@@ -164,7 +168,7 @@ function SortableRewriteImage({ asset, onEdit, onRemove, onView }: { asset: Draf
         style={{
           position: "absolute", top: -6, left: -6, fontSize: 10,
           width: 18, height: 18, minWidth: 18, padding: 0,
-          background: "rgba(0,0,0,.6)", borderRadius: "50%", color: "#1668dc",
+          background: "rgba(0,0,0,.6)", borderRadius: "50%", color: "var(--ui-accent,#1668dc)",
         }}
       />
       <Popconfirm title="移除此图片？" onConfirm={onRemove}>
@@ -186,7 +190,7 @@ function SortableRewriteImage({ asset, onEdit, onRemove, onView }: { asset: Draf
         style={{
           position: "absolute", bottom: -6, left: -6, fontSize: 10,
           width: 18, height: 18, minWidth: 18, padding: 0,
-          background: "rgba(0,0,0,.6)", borderRadius: "50%", color: "#fff",
+          background: "rgba(0,0,0,.6)", borderRadius: "50%", color: "var(--ui-on-primary,#fff)",
         }}
       />
     </div>
@@ -194,6 +198,15 @@ function SortableRewriteImage({ asset, onEdit, onRemove, onView }: { asset: Draf
 }
 
 export function XhsDraftsPage() {
+  const [executionAccounts, setExecutionAccounts] = useState<Array<{ id: number; nickname: string }>>([]);
+  const [executionAccountId, setExecutionAccountId] = useState<number>();
+  useEffect(() => {
+    void fetchAccounts('xhs').then(all => {
+      const pc = all.filter(a => a.sub_type === 'pc'); setExecutionAccounts(pc);
+      const selected = pc.find(a => a.id === getXhsAiAccount())?.id || pc[0]?.id;
+      setExecutionAccountId(selected); if (selected) setXhsAiAccount(selected);
+    });
+  }, []);
   const [activeMode, setActiveMode] = useState<AiContentMode>("rewrite");
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [selectedDraftId, setSelectedDraftId] = useState<number | null>(null);
@@ -638,7 +651,7 @@ export function XhsDraftsPage() {
               </div>
             ) : drafts.length === 0 ? (
               <Empty
-                image={<FileTextOutlined style={{ fontSize: 40, color: "#8c8c8c" }} />}
+                image={<FileTextOutlined style={{ fontSize: 40, color: "var(--ui-muted,#8c8c8c)" }} />}
                 imageStyle={{ height: 56 }}
                 description={
                   <div>
@@ -744,12 +757,12 @@ export function XhsDraftsPage() {
                         <div
                           onClick={() => setUploadModalOpen(true)}
                           style={{
-                            width: 60, height: 60, borderRadius: 4, border: "1px dashed #434343",
+                            width: 60, height: 60, borderRadius: 4, border: "1px dashed var(--ui-line,#434343)",
                             display: "flex", alignItems: "center", justifyContent: "center",
-                            cursor: "pointer", background: "rgba(255,255,255,0.04)",
+                            cursor: "pointer", background: "var(--ui-surface)",
                           }}
                         >
-                          <PlusOutlined style={{ fontSize: 20, color: "#8c8c8c" }} />
+                          <PlusOutlined style={{ fontSize: 20, color: "var(--ui-muted,#8c8c8c)" }} />
                         </div>
                       </div>
                     </SortableContext>
@@ -769,7 +782,7 @@ export function XhsDraftsPage() {
                       </Button>
                       <Button type="text" size="small" icon={<EditOutlined />}
                         onClick={() => { setOptimizeAssetId(asset.id); setOptimizeModalOpen(true); }}
-                        style={{ color: "#1668dc" }}
+                        style={{ color: "var(--ui-accent,#1668dc)" }}
                       />
                     </div>
                   ))}
@@ -782,7 +795,7 @@ export function XhsDraftsPage() {
                 </Tag>
                 {hasImageAssets && (
                   <>
-                    <PictureOutlined style={{ color: "#8c8c8c", fontSize: 12 }} />
+                    <PictureOutlined style={{ color: "var(--ui-muted,#8c8c8c)", fontSize: 12 }} />
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {sourceAssets.filter((a) => a.asset_type === "image").length} 张图片
                     </Text>
@@ -915,8 +928,8 @@ export function XhsDraftsPage() {
             </div>
 
             {rewritePreview !== null && (
-              <Card size="small" title="改写结果" style={{ marginBottom: 16, background: "#1a2332", borderColor: "#1668dc40" }}>
-                <Paragraph style={{ whiteSpace: "pre-wrap", color: "rgba(255,255,255,.75)", fontSize: 13, maxHeight: 240, overflow: "auto" }}>{rewritePreview}</Paragraph>
+              <Card size="small" title="改写结果" style={{ marginBottom: 16, background: "var(--ui-surface,#1a2332)", borderColor: "#1668dc40" }}>
+                <Paragraph style={{ whiteSpace: "pre-wrap", color: "var(--ui-muted)", fontSize: 13, maxHeight: 240, overflow: "auto" }}>{rewritePreview}</Paragraph>
                 <Space style={{ marginTop: 8 }}>
                   <Button type="primary" size="small" onClick={applyRewrite}>采用</Button>
                   <Button size="small" onClick={discardRewrite}>放弃</Button>
@@ -1021,7 +1034,7 @@ export function XhsDraftsPage() {
               <div>
                 <Row gutter={16} style={{ marginBottom: 16 }}>
                   <Col span={12}>
-                    <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center" }}>
+                    <div style={{ padding: 8, background: "var(--ui-surface)", borderRadius: 8, textAlign: "center" }}>
                       <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>当前素材</Text>
                       {isImage ? (
                         <Image
@@ -1034,13 +1047,13 @@ export function XhsDraftsPage() {
                         />
                       ) : (
                         <div style={{ height: 180, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                          <Space direction="vertical" align="center"><PlayCircleOutlined style={{ fontSize: 32, color: "#1668dc" }} /><Text style={{ fontSize: 12 }}>视频</Text></Space>
+                          <Space direction="vertical" align="center"><PlayCircleOutlined style={{ fontSize: 32, color: "var(--ui-accent,#1668dc)" }} /><Text style={{ fontSize: 12 }}>视频</Text></Space>
                         </div>
                       )}
                     </div>
                   </Col>
                   <Col span={12}>
-                    <div style={{ padding: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, textAlign: "center" }}>
+                    <div style={{ padding: 8, background: "var(--ui-surface)", borderRadius: 8, textAlign: "center" }}>
                       <Text type="secondary" style={{ fontSize: 11, display: "block", marginBottom: 4 }}>优化后预览</Text>
                       {optimizeResult ? (
                         <Image
@@ -1052,7 +1065,7 @@ export function XhsDraftsPage() {
                           preview={{ mask: <EyeOutlined style={{ fontSize: 16 }} /> }}
                         />
                       ) : (
-                        <div style={{ width: 180, height: 180, margin: "0 auto", border: "1px dashed #434343", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <div style={{ width: 180, height: 180, margin: "0 auto", border: "1px dashed var(--ui-line,#434343)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center" }}>
                           <Text type="secondary" style={{ fontSize: 12 }}>{isOptimizing ? "生成中..." : "等待生成"}</Text>
                         </div>
                       )}
@@ -1066,7 +1079,7 @@ export function XhsDraftsPage() {
                       <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>额外参考图（可选）</Text>
                       <Space size={8} wrap>
                         {optimizeRefImages.map((url, idx) => (
-                          <div key={idx} style={{ position: "relative", width: 40, height: 40, borderRadius: 4, overflow: "hidden", border: "1px solid #333" }}>
+                          <div key={idx} style={{ position: "relative", width: 40, height: 40, borderRadius: 4, overflow: "hidden", border: "1px solid var(--ui-line,#333)" }}>
                             <img src={url} style={{ width: "100%", height: "100%", objectFit: "cover" }} referrerPolicy="no-referrer" />
                             <Button type="text" danger size="small" icon={<DeleteOutlined />}
                               onClick={() => setOptimizeRefImages((prev) => prev.filter((_, i) => i !== idx))}
@@ -1077,9 +1090,9 @@ export function XhsDraftsPage() {
                         <div
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={() => setRefPickerOpen(true)}
-                          style={{ width: 40, height: 40, borderRadius: 4, border: "1px dashed #434343", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "rgba(255,255,255,0.04)" }}
+                          style={{ width: 40, height: 40, borderRadius: 4, border: "1px dashed var(--ui-line,#434343)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", background: "var(--ui-surface)" }}
                         >
-                          <PlusOutlined style={{ fontSize: 14, color: "#8c8c8c" }} />
+                          <PlusOutlined style={{ fontSize: 14, color: "var(--ui-muted,#8c8c8c)" }} />
                         </div>
                       </Space>
                     </div>
@@ -1347,6 +1360,10 @@ export function XhsDraftsPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <Select aria-label="内容和图片执行账号" placeholder="选择小红书账号" value={executionAccountId}
+        onChange={id => { setExecutionAccountId(id); setXhsAiAccount(id); }}
+        options={executionAccounts.map(a => ({ value: a.id, label: a.nickname }))}
+        style={{ width: 280, marginBottom: 16 }} />
       <PageHeader
         eyebrow="XHS Drafts"
         title="草稿工坊"

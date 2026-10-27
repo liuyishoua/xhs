@@ -84,6 +84,9 @@ class ChannelClient:
     def status(self, event_id, account_id):
         return self.request('GET', '/v1/messages/' + urllib.parse.quote(event_id, safe='') + '?' + urllib.parse.urlencode({'account_id': str(account_id)}))
 
+    def retry(self, event_id, account_id):
+        return self.request('POST', '/v1/messages/' + urllib.parse.quote(event_id, safe='') + '/retry', {'account_id': str(account_id)})
+
     def upload(self, account_id, blob, filename='image.png'):
         if not isinstance(blob, bytes) or len(blob) > 8 * 1024 * 1024:
             raise ChannelError('图片最多 8MB')

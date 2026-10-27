@@ -13,7 +13,7 @@ type AuthSnapshot = {
 };
 
 let snapshot: AuthSnapshot = {
-  status: api.hasRefreshToken() ? "checking" : "anonymous",
+  status: "checking",
   user: null,
   error: null
 };
@@ -25,6 +25,19 @@ function emit(next: AuthSnapshot): void {
   snapshot = next;
   listeners.forEach((listener) => listener());
 }
+
+window.addEventListener('xhs-auth-cleared', () => {
+  emit({ status: 'anonymous', user: null, error: null });
+});
+window.addEventListener('storage', event => {
+  if (event.key === 'spider_xhs_refresh_token' || event.key === null) {
+    // Rotating the same user's refresh token is not an account switch.
+    void recheckIdentity();
+  }
+});
+window.addEventListener('pageshow', event => {
+  if (event.persisted) window.location.reload();
+});
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
@@ -58,18 +71,13 @@ async function bootstrap(): Promise<void> {
     return;
   }
   bootstrapped = true;
-  if (!api.hasRefreshToken()) {
-    emit({ status: "anonymous", user: null, error: null });
-    return;
-  }
 
   emit({ ...snapshot, status: "checking", error: null });
   try {
     const user = await api.bootstrapAuth();
     emit(user ? { status: "authenticated", user, error: null } : { status: "anonymous", user: null, error: null });
   } catch {
-    api.clearAuthTokens();
-    emit({ status: "anonymous", user: null, error: "登录已过期，请重新登录。" });
+    emit({ status: "anonymous", user: null, error: "登录服务暂时不可用，请重试。" });
   }
 }
 
@@ -98,8 +106,8 @@ async function register(credentials: api.AuthCredentials): Promise<void> {
 }
 
 async function logout(): Promise<void> {
-  await api.logout();
-  emit({ status: "anonymous", user: null, error: null });
+  try { await api.logout(); }
+  catch { emit({ ...snapshot, error: '退出未完成，请稍后重试。' }); }
 }
 
 export function useAuth() {
@@ -118,3 +126,25 @@ export function useAuth() {
     logout
   };
 }
+
+// Read the shared identity without persisting another refresh token: otherwise
+// two tabs would keep waking and redirecting one another indefinitely.
+let identityCheck: Promise<void> | null = null;
+function recheckIdentity(): Promise<void> {
+  if (snapshot.status !== 'authenticated') return Promise.resolve();
+  if (identityCheck) return identityCheck;
+  const owner = snapshot.user?.id;
+  identityCheck = api.exchangeWorkspace(false).then(payload => {
+    if (payload.user?.id !== owner) {
+      // Reload this exact route; bootstrap replaces tokens before rendering.
+      // Emitting anonymous here would send the route guard through the hub.
+      window.location.reload();
+    }
+  }).catch(error => {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      api.clearAuthTokens(); // The route guard performs the single redirect.
+    }
+  }).finally(() => { identityCheck = null; });
+  return identityCheck;
+}
+window.addEventListener('focus', () => { void recheckIdentity(); });

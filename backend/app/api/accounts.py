@@ -25,7 +25,9 @@ from backend.app.services.account_service import (
     serialize_account,
     require_relogin_account,
     upsert_platform_account_from_login,
-    persist_refreshed_pc_cookies,
+    persist_refreshed_account_cookies,
+    record_session_event,
+    cookie_version_is_current,
 )
 from backend.app.services.account_health import AccountCheckError
 from xhs_utils.cookie_util import trans_cookies
@@ -175,26 +177,29 @@ def check_account(
     if cookie_version is None:
         account.status = "expired"
         account.status_message = "No stored cookie version"
+        record_session_event(db, account, 'manual_check', 'expired')
         db.commit()
         db.refresh(account)
         return serialize_account(account)
 
     adapter = _select_adapter(account.sub_type or "pc", pc_adapter, creator_adapter)
+    check_code = None
     try:
         cookies_text = decrypt_text(cookie_version.encrypted_cookies)
         original_cookies = decode_cookie_text(cookies_text)
         checked_cookies = dict(original_cookies)
-        user_info = adapter.get_user_info(checked_cookies)
-        if (account.sub_type == 'pc' and user_info.get('external_user_id')
-                != account.external_user_id):
-            raise AccountCheckError('risk', '登录 Cookie 与绑定账号不一致，请重新绑定 PC 账号')
-        if account.sub_type == 'pc' and not persist_refreshed_pc_cookies(
-                db, account.id, original_cookies, checked_cookies):
+        user_info = (adapter.check_session(checked_cookies) if account.sub_type == 'creator'
+                     else adapter.get_user_info(checked_cookies))
+        if user_info.get('external_user_id') != account.external_user_id:
+            raise AccountCheckError('risk', '登录 Cookie 与绑定账号不一致，请重新绑定所选账号')
+        if not persist_refreshed_account_cookies(
+                db, account.id, original_cookies, checked_cookies, source='manual_check'):
             raise HTTPException(409, '登录凭证已更新，请重新检查')
         try:
-            self_profile = self_profile_adapter.get_self_profile(
-                cookie_header_from_text(json.dumps(checked_cookies)))
-            user_info = enrich_user_info_with_xhs_self_profile(user_info, self_profile)
+            if account.sub_type == 'pc':
+                self_profile = self_profile_adapter.get_self_profile(
+                    cookie_header_from_text(json.dumps(checked_cookies)))
+                user_info = enrich_user_info_with_xhs_self_profile(user_info, self_profile)
         except Exception:
             pass
         account.status = "active"
@@ -205,33 +210,29 @@ def check_account(
         account.profile_json = json.dumps(account_profile_from_user_info(user_info), ensure_ascii=False, separators=(",", ":"))
         account.updated_at = shanghai_now()
 
-        if account.sub_type == "creator":
-            try:
-                from apis.xhs_creator_apis import XHS_Creator_Apis
-                creator_cookies = decode_cookie_text(cookies_text)
-                api = XHS_Creator_Apis()
-                success, msg, _ = api.get_fileIds("image", creator_cookies)
-                if not success:
-                    account.status = "expired"
-                    account.status_message = f"上传凭证获取失败: {msg}"
-            except Exception as upload_exc:
-                account.status = "expired"
-                account.status_message = f"上传凭证验证异常: {upload_exc}"
     except HTTPException:
         raise
     except Exception as exc:
+        if not cookie_version_is_current(db, account.id, cookie_version.id, cookie_version.encrypted_cookies):
+            raise HTTPException(409, '登录凭证已更新，请重新检查') from None
+        check_code = getattr(exc, 'business_code', None)
         account.status = exc.account_status if isinstance(exc, AccountCheckError) else 'unknown'
         account.status_message = str(exc) if isinstance(exc, AccountCheckError) else '账号检查暂未完成，请检查家庭网络后重试'
         account.updated_at = shanghai_now()
 
+    record_session_event(db, account, 'manual_check', account.status, cookie_version_id=cookie_version.id,
+                         business_code=check_code)
     db.commit()
     db.refresh(account)
     return serialize_account(account)
 
 
 @router.patch("/{account_id}")
-def update_account(account_id: int):
-    return {"id": account_id, "status": "updated"}
+def update_account(account_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    account = db.get(PlatformAccount, account_id)
+    if account is None or account.user_id != current_user.id:
+        raise HTTPException(404, 'Account not found')
+    raise HTTPException(405, '请通过重新登录或检查更新账号资料')
 
 
 @router.delete("/{account_id}")
@@ -243,13 +244,19 @@ def delete_account(
     account = db.get(PlatformAccount, account_id)
     if account is None or account.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
-    from backend.app.models.direct_message import DmListener, DirectMessage, DmHistory, DmConversation
-    from sqlalchemy import delete
+    from backend.app.models.direct_message import DmListener, DirectMessage, DmHistory, DmConversation, DmManualMessage, DmMedia
+    from sqlalchemy import delete, update
+    from backend.app.core.time import shanghai_now
+    db.execute(update(PlatformAccount).where(PlatformAccount.id == account_id).values(updated_at=shanghai_now()))
     listener = db.get(DmListener, account_id)
     if listener and listener.enabled:
         raise HTTPException(409, '请先停止该账号的私信监听再删除账号')
     if db.scalar(select(DirectMessage.id).where(DirectMessage.account_id == account_id, DirectMessage.state == 'sending')):
         raise HTTPException(409, '该账号正在发送私信，请等待发送结束')
+    if db.scalar(select(DmManualMessage.id).where(DmManualMessage.account_id == account_id, DmManualMessage.state == 'sending')):
+        raise HTTPException(409, '该账号正在发送私信，请等待发送结束')
+    db.execute(delete(DmManualMessage).where(DmManualMessage.account_id == account_id))
+    db.execute(delete(DmMedia).where(DmMedia.account_id == account_id))
     db.execute(delete(DirectMessage).where(DirectMessage.account_id == account_id))
     db.execute(delete(DmHistory).where(DmHistory.account_id == account_id))
     db.execute(delete(DmConversation).where(DmConversation.account_id == account_id))

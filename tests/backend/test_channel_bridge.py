@@ -25,7 +25,7 @@ def test_channel_uses_workspace_identity_without_platform_account(bridge):
     client,calls=bridge;r=client.post('/api/channel/messages',json={'message_id':'stable-message','text':'分析','context':{'topic_id':'draft:1'}})
     assert r.status_code==202
     assert calls[0][1][0]=='user:1'
-    assert calls[0][2]=={'surface':'content','event_type':'content.rewrite_requested'}
+    assert calls[0][2]=={'surface':'content','event_type':'content.rewrite_requested','route_id':''}
 
 def test_channel_uses_owned_platform_identity_and_rejects_other_user(bridge):
     client,calls=bridge

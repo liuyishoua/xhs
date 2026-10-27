@@ -1,4 +1,5 @@
 import random
+from dataclasses import asdict, fields
 import re
 import time
 
@@ -21,6 +22,9 @@ from xhs_utils.xhs_pc.params import (
 from xhs_utils.xhs_pc.runtime import generate_profile_data, generate_websectiga
 from xhs_utils.xhs_pc.state import (
     PcDeviceProfile,
+    PcSessionState,
+    B1RuntimeState,
+    MnsStageMaterial,
     REFERENCE_PROFILE,
     cookie_header,
     initial_pc_cookies,
@@ -29,6 +33,10 @@ from xhs_utils.common_util import generate_a1, generate_web_id
 
 
 _GETDSS_RE = re.compile(r"function\s+getdss\s*\(\s*\)\s*\{\s*return\s+'(\d+)'")
+
+
+class QrCodeState(RuntimeError):
+    """A terminal/interactive QR state is not a transport failure."""
 
 
 class XHSLoginApi:
@@ -86,6 +94,35 @@ class XHSLoginApi:
 
     def close(self):
         self.http.close()
+
+    def export_phone_state(self):
+        """Private state to encrypt alongside the pending login cookies."""
+        profile = asdict(self.profile)
+        profile = {item.name: profile[item.name] for item in fields(PcDeviceProfile)
+                   if item.init and item.name != 'cookies'}
+        return {
+            'profile': profile,
+            'dsl': self.dsl,
+            'login_b1': self._login_b1,
+            'webprofile_reported': self._webprofile_reported,
+            'profile_data': self.profile_data,
+            'host_cookies': self.host_cookie_state(),
+        }
+
+    def restore_phone_state(self, cookies, state):
+        profile = dict(state['profile'])
+        profile['session'] = PcSessionState(**profile['session'])
+        profile['b1_state'] = B1RuntimeState(**profile['b1_state'])
+        profile['mns_stages'] = {
+            key: MnsStageMaterial(**value)
+            for key, value in profile['mns_stages'].items()
+        }
+        self.profile = PcDeviceProfile(cookies=cookies, **profile)
+        self.dsl = state['dsl']
+        self._login_b1 = state['login_b1']
+        self._webprofile_reported = state['webprofile_reported']
+        self.profile_data = state['profile_data']
+        self._cookie_store = HostCookieStore.from_state(state['host_cookies'])
 
     def _new_profile(self, cookies):
         profile = PcDeviceProfile(
@@ -591,7 +628,10 @@ class XHSLoginApi:
             return False, res.get('msg', '二维码状态响应缺少 codeStatus'), cookies
 
         if status == 2:
-            cookies = self._login_by_qrcode_status(qr_id, code, cookies)
+            try:
+                cookies = self._login_by_qrcode_status(qr_id, code, cookies)
+            except QrCodeState as exc:
+                return False, str(exc), cookies
 
         status_map = {
             0: (False, '请扫描二维码'),
@@ -621,6 +661,8 @@ class XHSLoginApi:
             proxies=self.proxies,
             timeout=REQUEST_TIMEOUT
         )
+        if not resp.ok:
+            raise RuntimeError(f'二维码登录请求被拒绝 (HTTP {resp.status_code})')
         self._merge_response_cookies(
             cookies,
             resp,
@@ -634,6 +676,8 @@ class XHSLoginApi:
 
         res = resp.json()
         data = res.get('data') or {}
+        if res.get('success') and data.get('code_status') in (0, 1, 3):
+            raise QrCodeState({0: '请扫描二维码', 1: '请确认登录', 3: '二维码已过期'}[data['code_status']])
         if not res.get('success') or data.get('code_status') != 2:
             raise RuntimeError(res.get('msg') or '二维码最终登录状态无效')
         login_info = data.get('login_info') or {}
@@ -693,6 +737,8 @@ class XHSLoginApi:
         return res.get('success', False), res.get('msg', ''), res
 
     def login_by_phone(self, phone, code, cookies, zone='86'):
+        # Diagnostics contain only stages/codes, never the phone, code or tokens.
+        self.last_phone_diagnostics = {'phase': 'checking_code'}
         check_api = '/api/sns/web/v1/login/check_code'
         params = {"phone": phone, "zone": zone, "code": code}
         splice_api = splice_str(check_api, params)
@@ -710,14 +756,21 @@ class XHSLoginApi:
             timeout=REQUEST_TIMEOUT
         )
         self._merge_response_cookies(cookies, resp)
+        self._observe_phone_response(resp, {})
+        http_status = self.last_phone_diagnostics.get('http_status', 200)
+        if http_status >= 400:
+            return False, f'小红书登录请求被拒绝（HTTP {http_status}）', {'cookies': cookies}
         res = resp.json()
+        self._observe_phone_response(resp, res)
         if not res.get('success'):
             return False, res.get('msg', '验证码验证失败'), {'cookies': cookies}
         mobile_token = (res.get('data') or {}).get('mobile_token')
+        self.last_phone_diagnostics['has_mobile_token'] = bool(mobile_token)
         if not mobile_token:
             return False, res.get('msg', '验证码响应缺少 mobile_token'), {'cookies': cookies, 'res_json': res}
 
         login_api = '/api/sns/web/v2/login/code'
+        self.last_phone_diagnostics = {'phase': 'submitting_login', 'code_check_passed': True}
         data = {"mobile_token": mobile_token, "zone": zone, "phone": phone}
         headers, data = self._signed_request_params(cookies, login_api, data)
         headers = build_pc_login_headers(
@@ -733,10 +786,16 @@ class XHSLoginApi:
         )
         self._merge_response_cookies(cookies, resp)
 
+        self._observe_phone_response(resp, {})
+        http_status = self.last_phone_diagnostics.get('http_status', 200)
+        if http_status >= 400:
+            return False, f'小红书登录请求被拒绝（HTTP {http_status}）', {'cookies': cookies}
         res = resp.json()
+        self._observe_phone_response(resp, res)
         if not res.get('success'):
             return False, res.get('msg', '登录失败'), {'cookies': cookies}
         session = (res.get('data') or {}).get('session')
+        self.last_phone_diagnostics['has_session'] = bool(session)
         if not session:
             return False, res.get('msg', '登录响应缺少 session'), {'cookies': cookies, 'res_json': res}
         cookies.pop('web_session', None)
@@ -746,6 +805,16 @@ class XHSLoginApi:
             'cookies': cookies,
             'res_json': res,
         }
+
+    def _observe_phone_response(self, response, payload):
+        if type(getattr(response, 'status_code', None)) is int:
+            self.last_phone_diagnostics['http_status'] = response.status_code
+        value = payload.get('code')
+        if type(value) is int and abs(value) <= 99999999:
+            self.last_phone_diagnostics['platform_code'] = value
+        elif isinstance(value, str) and value.lstrip('-').isdigit() and len(value) <= 8:
+            self.last_phone_diagnostics['platform_code'] = int(value)
+        self.last_phone_diagnostics['platform_success'] = payload.get('success') is True
 
     @staticmethod
     def cookies_to_str(cookies):

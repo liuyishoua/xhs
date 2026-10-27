@@ -3,16 +3,45 @@
 	auto_https disable_redirects
 }
 https://d.58nft.net:9450 {
+	@permission_page path / /platforms/* /tasks /models
+	forward_auth @permission_page 127.0.0.1:8787 {
+		uri /api/auth/access/gate/xhs-all-in-one
+	}
 	tls /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/d.58nft.net/d.58nft.net.crt /var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/d.58nft.net/d.58nft.net.key
 	encode zstd gzip
+	@hub path /platform-select
+	redir @hub https://d.58nft.net:9461{uri} 302
+	@login path /login
+	redir @login https://d.58nft.net:9461/platform-select?open=xhs 302
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy no-referrer
 		X-Frame-Options DENY
 	}
-	reverse_proxy 127.0.0.1:8772 {
-		header_up -X-Forwarded-Prefix
-		header_up Cookie "^portal_session=[^;]*(; *)?" ""
-		header_up Cookie "; *portal_session=[^;]*" ""
+	handle /assets/* {
+		root * /srv/xhs-ui
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server {
+			precompressed br gzip
+		}
+	}
+	@app_html path / /platforms/* /login /platform-select /tasks /models
+	header @app_html Cache-Control "no-cache"
+	handle_errors {
+		header Cache-Control "no-store"
+		respond "{err.status_text}" {err.status_code}
+	}
+	handle /api/auth/* {
+		reverse_proxy 127.0.0.1:8787
+	}
+	handle /api/sms-relay/inbound/* {
+		reverse_proxy 127.0.0.1:8785
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8772 {
+			header_up -X-Forwarded-Prefix
+			header_up Cookie "^portal_session=[^;]*(; *)?" ""
+			header_up Cookie "; *portal_session=[^;]*" ""
+		}
 	}
 }

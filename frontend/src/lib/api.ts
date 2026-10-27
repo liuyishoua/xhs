@@ -84,6 +84,9 @@ const http = axios.create({
 
 const REFRESH_TOKEN_KEY = "spider_xhs_refresh_token";
 let accessToken: string | null = null;
+let authEpoch = 0;
+let workspaceUserId: number | null = null;
+type SessionRequest = { _authEpoch?: number; _authRetry?: boolean; _silent?: boolean };
 
 export type AuthCredentials = {
   username: string;
@@ -107,6 +110,7 @@ function setAccessToken(token: string | null): void {
 }
 
 function persistAuthPayload(payload: AuthPayload): AuthPayload {
+  workspaceUserId = payload.user?.id ?? null;
   setAccessToken(payload.access_token);
   if (payload.refresh_token) {
     window.localStorage.setItem(REFRESH_TOKEN_KEY, payload.refresh_token);
@@ -115,11 +119,15 @@ function persistAuthPayload(payload: AuthPayload): AuthPayload {
 }
 
 export function clearAuthTokens(): void {
+  authEpoch += 1;
   setAccessToken(null);
+  workspaceUserId = null;
   window.localStorage.removeItem(REFRESH_TOKEN_KEY);
+  window.dispatchEvent(new Event('xhs-auth-cleared'));
 }
 
 http.interceptors.request.use((config) => {
+  (config as typeof config & SessionRequest)._authEpoch = authEpoch;
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
   }
@@ -127,12 +135,28 @@ http.interceptors.request.use((config) => {
 });
 
 http.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    if ((response.config as typeof response.config & SessionRequest)._authEpoch !== authEpoch) {
+      throw new axios.CanceledError('登录用户已变化，丢弃旧请求结果');
+    }
+    if (response.config.method !== 'get' && !response.config.url?.startsWith('/auth/')) {
+      window.dispatchEvent(new Event('xhs-workspace-data-changed'));
+    }
+    return response;
+  },
   async (error) => {
     if (axios.isCancel(error)) {
       return Promise.reject(error);
     }
-    const originalRequest = error.config as typeof error.config & { _authRetry?: boolean; _silent?: boolean };
+    const originalRequest = error.config as typeof error.config & SessionRequest;
+    if (originalRequest?._authEpoch !== undefined && originalRequest._authEpoch !== authEpoch) {
+      return Promise.reject(new axios.CanceledError('登录用户已变化，丢弃旧请求结果'));
+    }
+    // Authentication endpoints must fail directly: refreshing a rejected
+    // refresh token here would recursively refresh forever.
+    if (/^\/auth\/(login|register|refresh|workspace\/exchange)$/.test(originalRequest?.url || '')) {
+      return Promise.reject(error);
+    }
     if (error.response?.status !== 401 || originalRequest?._authRetry || !getRefreshToken()) {
       if (!originalRequest?._silent) {
         const detail = error.response?.data?.detail;
@@ -156,16 +180,19 @@ http.interceptors.response.use(
 );
 
 export async function login(credentials: AuthCredentials): Promise<AuthPayload> {
+  clearAuthTokens();
   const response = await http.post<AuthPayload>("/auth/login", credentials);
   return persistAuthPayload(response.data);
 }
 
 export async function register(credentials: AuthCredentials): Promise<AuthPayload> {
+  clearAuthTokens();
   const response = await http.post<AuthPayload>("/auth/register", credentials);
   return persistAuthPayload(response.data);
 }
 
 export async function refreshAccessToken(): Promise<string> {
+  const epoch = authEpoch;
   const refreshToken = getRefreshToken();
   if (!refreshToken) {
     throw new Error("Missing refresh token");
@@ -174,16 +201,38 @@ export async function refreshAccessToken(): Promise<string> {
   const response = await http.post<{ access_token: string; token_type: "bearer" }>("/auth/refresh", {
     refresh_token: refreshToken
   });
+  if (authEpoch !== epoch || getRefreshToken() !== refreshToken) {
+    throw new axios.CanceledError('登录用户已变化');
+  }
   setAccessToken(response.data.access_token);
   return response.data.access_token;
 }
 
 export async function fetchMe(): Promise<PlatformUser> {
   const response = await http.get<PlatformUser>("/auth/me");
+  workspaceUserId = response.data.id;
+  await http.post("/auth/workspace/session");
   return response.data;
 }
 
+export async function exchangeWorkspace(persist = true): Promise<AuthPayload> {
+  const response = await http.post<AuthPayload>("/auth/workspace/exchange", {}, {
+    headers: { "X-App-Request": "1" }, timeout: 10000, ...{ _silent: true }
+  });
+  return persist ? persistAuthPayload(response.data) : response.data;
+}
+
 export async function bootstrapAuth(): Promise<PlatformUser | null> {
+  try {
+    const payload = await exchangeWorkspace();
+    return payload.user ?? null;
+  } catch (error) {
+    if (!axios.isAxiosError(error) || error.response?.status !== 401) throw error;
+    if (['9450', '9461'].includes(window.location.port)) {
+      clearAuthTokens();
+      return null;
+    }
+  }
   if (!getAccessToken() && hasRefreshToken()) {
     await refreshAccessToken();
   }
@@ -194,11 +243,9 @@ export async function bootstrapAuth(): Promise<PlatformUser | null> {
 }
 
 export async function logout(): Promise<void> {
-  try {
-    await http.post("/auth/logout");
-  } finally {
-    clearAuthTokens();
-  }
+  const token = accessToken;
+  await http.post("/auth/logout", undefined, { headers: token ? { Authorization: `Bearer ${token}` } : {}, timeout: 10000 });
+  clearAuthTokens();
 }
 
 export async function fetchPlatforms(): Promise<PlatformMeta[]> {
@@ -518,28 +565,46 @@ export async function sendDraftToPublish(draftId: number, payload: SendDraftToPu
   return response.data;
 }
 
+export function saveAccountSelection(key: string, accountId: number) {
+  if (!workspaceUserId) return;
+  try { localStorage.setItem(`${key}:u${workspaceUserId}`, String(accountId)); } catch { /* Optional persistence. */ }
+}
+export function readAccountSelection(key: string): number | undefined {
+  if (!workspaceUserId) return undefined;
+  try { const id = Number(localStorage.getItem(`${key}:u${workspaceUserId}`)); return id > 0 ? id : undefined; } catch { return undefined; }
+}
+export function setXhsAiAccount(accountId: number) {
+  saveAccountSelection('xhs_ai_account_id', accountId);
+}
+export function getXhsAiAccount(): number | undefined {
+  return readAccountSelection('xhs_ai_account_id');
+}
+function aiAccountPayload<T extends object>(payload: T): T & { account_id?: number } {
+  return { account_id: getXhsAiAccount(), ...payload };
+}
+
 export async function rewriteDraftWithAi(payload: RewriteDraftPayload): Promise<Draft> {
-  const response = await http.post<Draft>("/ai/rewrite-note", payload);
+  const response = await http.post<Draft>("/ai/rewrite-note", aiAccountPayload(payload));
   return response.data;
 }
 
 export async function generateNoteWithAi(payload: GenerateNotePayload): Promise<Draft> {
-  const response = await http.post<Draft>("/ai/generate-note", payload);
+  const response = await http.post<Draft>("/ai/generate-note", aiAccountPayload(payload));
   return response.data;
 }
 
 export async function generateTitleOptions(payload: GenerateTitlePayload): Promise<{ items: string[] }> {
-  const response = await http.post<{ items: string[] }>("/ai/generate-title", payload);
+  const response = await http.post<{ items: string[] }>("/ai/generate-title", aiAccountPayload(payload));
   return response.data;
 }
 
 export async function generateTagOptions(payload: GenerateTagsPayload): Promise<{ items: string[] }> {
-  const response = await http.post<{ items: string[] }>("/ai/generate-tags", payload);
+  const response = await http.post<{ items: string[] }>("/ai/generate-tags", aiAccountPayload(payload));
   return response.data;
 }
 
 export async function polishTextWithAi(payload: PolishTextPayload): Promise<{ text: string }> {
-  const response = await http.post<{ text: string }>("/ai/polish-text", payload);
+  const response = await http.post<{ text: string }>("/ai/polish-text", aiAccountPayload(payload));
   return response.data;
 }
 
@@ -557,12 +622,12 @@ export async function deleteUserImage(fileName: string): Promise<void> {
 }
 
 export async function generateCoverWithAi(payload: GenerateCoverPayload): Promise<GeneratedImageAsset> {
-  const response = await http.post<GeneratedImageAsset>("/ai/images/generate-cover", payload);
+  const response = await http.post<GeneratedImageAsset>("/ai/images/generate-cover", aiAccountPayload(payload));
   return response.data;
 }
 
 export async function generateImageWithAi(payload: GenerateImagePayload): Promise<GenerateImageResult> {
-  const response = await http.post<GenerateImageResult>("/ai/images/generate", payload, { timeout: 180000 });
+  const response = await http.post<GenerateImageResult>("/ai/images/generate", aiAccountPayload(payload), { timeout: 180000 });
   return response.data;
 }
 
@@ -572,7 +637,7 @@ export async function fetchUserImages(): Promise<{ items: UserImageFile[] }> {
 }
 
 export async function describeImageWithAi(payload: DescribeImagePayload): Promise<{ text: string }> {
-  const response = await http.post<{ text: string }>("/ai/images/describe", payload);
+  const response = await http.post<{ text: string }>("/ai/images/describe", aiAccountPayload(payload));
   return response.data;
 }
 
@@ -787,15 +852,51 @@ function backgroundRequestOptions(signal?: AbortSignal) {
   return { ...quietRequestOptions(signal), timeout: 15000 };
 }
 
+export async function createXhsQrLogin(payload: {
+  sub_type: "pc" | "creator";
+  sync_creator?: boolean;
+  account_id?: number;
+}, signal?: AbortSignal): Promise<XhsQrLoginSession> {
+  const response = await http.post<XhsQrLoginSession>(`/xhs/login-sessions/${payload.sub_type}/qrcode`, {
+    sync_creator: payload.sync_creator, account_id: payload.account_id
+  }, quietRequestOptions(signal));
+  return response.data;
+}
+
+export async function importXhsAccountCookie(payload: {
+  sub_type: "pc" | "creator";
+  cookie_string: string;
+  account_id?: number;
+  sync_creator?: boolean;
+}, signal?: AbortSignal): Promise<PlatformAccount> {
+  const response = await http.post<PlatformAccount>("/accounts/import-cookie", {
+    platform: "xhs", ...payload
+  }, quietRequestOptions(signal));
+  return response.data;
+}
+
+export async function pollXhsQrLogin(sessionId: number, signal?: AbortSignal): Promise<XhsQrLoginSession> {
+  const response = await http.get<XhsQrLoginSession>(`/xhs/login-sessions/${sessionId}`, backgroundRequestOptions(signal));
+  return response.data;
+}
+
+export async function prepareXhsPhoneLogin(accountId?: number, signal?: AbortSignal): Promise<{ preparation_token: string; expires_in: number }> {
+  const response = await http.post<{ preparation_token: string; expires_in: number }>(
+    "/xhs/login-sessions/pc/phone/prepare", { account_id: accountId }, quietRequestOptions(signal)
+  );
+  return response.data;
+}
+
 export async function sendXhsPhoneCode(payload: {
   sub_type: "pc" | "creator";
   phone: string;
+  preparation_token?: string;
   sync_creator?: boolean;
   account_id?: number;
 }, signal?: AbortSignal): Promise<{ session_id: number; status: string; message: string }> {
   const response = await http.post<{ session_id: number; status: string; message: string }>(
     `/xhs/login-sessions/${payload.sub_type}/phone/send-code`,
-    { phone: payload.phone, sync_creator: payload.sync_creator, account_id: payload.account_id },
+    { preparation_token: payload.preparation_token, phone: payload.phone, sync_creator: payload.sync_creator, account_id: payload.account_id },
     quietRequestOptions(signal)
   );
   return response.data;
@@ -866,14 +967,14 @@ export type ChannelMessage = {
   error: string;
   result: { output: { text: string; structured?: { reply?: string } | null } | null } | null;
 };
-export async function submitChannelMessage(data: { message_id: string; text: string; images: string[]; context: Record<string, unknown> }): Promise<ChannelMessage> {
+export async function submitChannelMessage(data: { message_id: string; text: string; images: string[]; context: Record<string, unknown>; account_id?: number; agent_id?: string }): Promise<ChannelMessage> {
   return (await http.post<ChannelMessage>("/channel/messages", data)).data;
 }
-export async function fetchChannelMessage(id: string): Promise<ChannelMessage> {
-  return (await http.get<ChannelMessage>(`/channel/messages/${encodeURIComponent(id)}`)).data;
+export async function fetchChannelMessage(id: string, account_id?: number): Promise<ChannelMessage> {
+  return (await http.get<ChannelMessage>(`/channel/messages/${encodeURIComponent(id)}`, { params: { account_id } })).data;
 }
-export async function uploadChannelImage(file: File): Promise<{ id: string }> {
-  const data = new FormData(); data.append("file", file);
+export async function uploadChannelImage(file: File, account_id?: number): Promise<{ id: string }> {
+  const data = new FormData(); data.append("file", file); if (account_id) data.append("account_id", String(account_id));
   return (await http.post<{ id: string }>("/channel/assets", data)).data;
 }
 
@@ -884,13 +985,18 @@ export type MulticaRoute = {
 };
 export type ModelRouting = {
   connected: boolean; error?: string; multica_url: string; routes: MulticaRoute[];
-  bindings: Record<string, string | null>; choices: Record<string, string[]>;
+  bindings: Record<string, string | null>; choices: Record<string, string[]>; agent_choices?: Record<string, AgentChoice[]>;
 };
-export async function fetchModelRouting(): Promise<ModelRouting> {
-  return (await http.get<ModelRouting>('/model-routing')).data;
+export async function fetchModelRouting(account_id?: number): Promise<ModelRouting> {
+  return (await http.get<ModelRouting>('/model-routing', { params: { account_id } })).data;
 }
-export async function saveModelRouting(purpose: string, route_id: string) {
-  return (await http.put(`/model-routing/${encodeURIComponent(purpose)}`, { route_id })).data;
+export async function saveModelRouting(purpose: string, agent_id: string, account_id: number) {
+  return (await http.put(`/model-routing/${encodeURIComponent(purpose)}`, { agent_id, account_id })).data;
+}
+export type AgentChoice = { id: string; name: string; route_id: string };
+export type AgentSnapshot = { id?: string; name?: string; route_id?: string; route_version?: number };
+export async function fetchDmAgents(account_id: number, signal?: AbortSignal): Promise<{ connected: boolean; agents: AgentChoice[]; default_agent_id?: string }> {
+  return (await http.get('/xhs/direct-messages/agents', { params: { account_id }, signal })).data;
 }
 export type DmControlMode = 'request_approval' | 'auto_approve' | 'full_access';
 export type XhsNetworkStatus = {
@@ -906,7 +1012,7 @@ export async function checkXhsNetwork(): Promise<XhsNetworkStatus> {
   return (await http.post('/xhs/direct-messages/network/check')).data;
 }
 export type DmListener = {
-  account_id: number; enabled: boolean; auto_reply: boolean; route_id: string;
+  account_id: number; enabled: boolean; auto_reply: boolean; route_id: string; agent_id?: string; agent_snapshot?: AgentSnapshot;
   state: string; error: string; updated_at: string;
   control_mode: DmControlMode;
   conversation_holds?: { message_id: number; peer_id: string; state: 'uncertain' | 'held'; reason: string }[];
@@ -916,7 +1022,7 @@ export async function fetchDmMedia(account_id: number, asset_id: string, signal?
   return (await http.get(`/xhs/direct-messages/media/${asset_id}`, { ...backgroundRequestOptions(signal), params: { account_id }, responseType: 'blob' })).data;
 }
 export type DirectMessageRecord = {
-  id: number; account_id: number; message_id: string; peer_id: string; text: string;
+  id: number; account_id: number; message_id: string; peer_id: string; text: string; agent_snapshot?: AgentSnapshot;
   media?: DmMediaRef[]; reply_message?: { type: string; media: DmMediaRef[] };
   reply_messages?: { type: string; text: string; media: DmMediaRef[]; status: string; delay_seconds: number }[];
   state: string; reply_text: string; channel_event_id: string; error: string;
@@ -932,13 +1038,46 @@ export type DmHistoryResult = {
 export async function fetchDmHistory(account_id: number, peer_id: string): Promise<DmHistoryResult> {
   return (await http.get('/xhs/direct-messages/history', { params: { account_id, peer_id } })).data;
 }
+
+export type XhsChatConversation = { peer_id: string; nickname: string; avatar: string; last_text: string; last_at: string | null; syncing: boolean };
+export type XhsChatConnection = { state: string; error: string; manual_enabled: boolean; auto_reply: boolean };
+export type XhsChatMessage = DmHistoryResult['items'][number] & { key: string; state: string; error?: string; manual_id?: number; client_id?: string };
+export type XhsChatSend = { client_id: string; expected_external_user_id: string; peer_id: string; text: string; asset_id?: string };
+export async function fetchXhsChats(account_id: number, signal?: AbortSignal): Promise<{ items: XhsChatConversation[]; connection: XhsChatConnection }> {
+  return (await http.get('/xhs/chat/conversations', { ...backgroundRequestOptions(signal), params: { account_id } })).data;
+}
+export async function fetchXhsChatMessages(account_id: number, peer_id: string, signal?: AbortSignal): Promise<{ items: XhsChatMessage[]; syncing: boolean; manual_control: boolean }> {
+  return (await http.get('/xhs/chat/messages', { ...backgroundRequestOptions(signal), params: { account_id, peer_id } })).data;
+}
+export async function connectXhsChat(account_id: number, enabled: boolean) {
+  return (await http.post(`/xhs/chat/accounts/${account_id}/connect`, { enabled })).data;
+}
+export async function refreshXhsChat(account_id: number, peer_id?: string) {
+  return (await http.post(`/xhs/chat/accounts/${account_id}/refresh`, { peer_id })).data;
+}
+export async function sendXhsChat(account_id: number, payload: XhsChatSend) {
+  return (await http.post(`/xhs/chat/accounts/${account_id}/send`, payload, backgroundRequestOptions())).data;
+}
+export async function checkXhsChatSend(account_id: number, client_id: string, signal?: AbortSignal) {
+  return (await http.get(`/xhs/chat/requests/${encodeURIComponent(client_id)}`, { ...backgroundRequestOptions(signal), params: { account_id } })).data;
+}
+export async function uploadXhsChatImage(account_id: number, file: File): Promise<DmMediaRef> {
+  const data = new FormData(); data.append('file', file);
+  return (await http.post(`/xhs/chat/accounts/${account_id}/images`, data)).data;
+}
+export async function controlXhsChat(account_id: number, peer_id: string, enabled: boolean) {
+  return (await http.post(`/xhs/chat/accounts/${account_id}/control`, { peer_id, enabled })).data;
+}
+export async function resolveXhsChatSend(id: number, outcome: 'confirmed_sent' | 'skip') {
+  return (await http.post(`/xhs/chat/requests/${id}/resolve`, { outcome })).data;
+}
 export async function reanalyzeDirectMessage(id: number) {
   return (await http.post(`/xhs/direct-messages/${id}/reanalyze`)).data;
 }
 export async function fetchDmListeners(signal?: AbortSignal): Promise<{ items: DmListener[] }> {
   return (await http.get('/xhs/direct-messages/listeners', backgroundRequestOptions(signal))).data;
 }
-export async function configureDmListener(account_id: number, data: { enabled: boolean; auto_reply: boolean; route_id: string; control_mode?: DmControlMode }): Promise<DmListener> {
+export async function configureDmListener(account_id: number, data: { enabled: boolean; auto_reply: boolean; agent_id?: string; route_id?: string; control_mode?: DmControlMode }): Promise<DmListener> {
   return (await http.put(`/xhs/direct-messages/listeners/${account_id}`, data)).data;
 }
 export async function fetchDirectMessages(account_id: number, signal?: AbortSignal): Promise<{ items: DirectMessageRecord[] }> {
@@ -949,4 +1088,73 @@ export async function resolveDirectMessage(id: number, outcome: 'confirmed_sent'
 }
 export async function approveDirectMessage(id: number) {
   return (await http.post(`/xhs/direct-messages/${id}/approve`)).data;
+}
+
+
+export type CommentMonitoring = {
+  account_id: number; nickname: string; configured: boolean; enabled?: boolean;
+  account_status?: string; account_problem?: string;
+  automation_enabled?: boolean; auto_reply?: boolean; control_mode?: DmControlMode; route_id?: string; agent_id?: string; agent_snapshot?: AgentSnapshot;
+  state?: string; poll_seconds?: number; heartbeat?: string; checked_at?: string;
+  error?: string; counts?: Record<string, number>; pending?: number; schedule_error?: boolean;
+  verified_visible?: number; sending_paused?: boolean; sending_pause_reason?: string; visibility_warning?: string; verification_error?: string;
+  schedule: Array<{ day: string; slots: string[] }>;
+  items: Array<{ id: string; stage: string; text: string; target_text: string; note_title: string; agent_snapshot?: AgentSnapshot;
+    note_id: string; comment_id: string; peer_id: string; kind: string; reply_text: string;
+    reply_comment_id: string; reply_version: string; reason: string; detail: string; created_at: string; updated_at: string;
+    verification?: { state?: string; checked_at?: string; observer_role?: string; sender_visible?: boolean; observer_visible?: boolean } }>;
+};
+
+export async function fetchCommentMonitoring(accountId: number, signal?: AbortSignal): Promise<CommentMonitoring> {
+  const response = await http.get<CommentMonitoring>("/xhs/comments/monitoring", {
+    params: { account_id: accountId }, signal, timeout: 10000,
+  });
+  return response.data;
+}
+
+export async function fetchCommentRoutes(accountId: number, signal?: AbortSignal): Promise<{ connected: boolean; agents: AgentChoice[]; default_agent_id?: string; routes: Array<{ id: string; name: string; agent_name: string }> }> {
+  return (await http.get('/xhs/comments/routes', { params: { account_id: accountId }, signal, timeout: 10000 })).data;
+}
+export async function configureCommentListener(accountId: number, data: { enabled: boolean; auto_reply: boolean; control_mode: DmControlMode; agent_id?: string; route_id?: string }): Promise<CommentMonitoring> {
+  return (await http.put(`/xhs/comments/listeners/${accountId}`, data, { timeout: 25000 })).data;
+}
+export async function approveCommentReply(accountId: number, entryId: string, replyVersion: string) {
+  return (await http.post(`/xhs/comments/listeners/${accountId}/entries/${encodeURIComponent(entryId)}/approve`, { reply_version: replyVersion })).data;
+}
+export async function skipCommentReply(accountId: number, entryId: string) {
+  return (await http.post(`/xhs/comments/listeners/${accountId}/entries/${encodeURIComponent(entryId)}/skip`)).data;
+}
+
+export type ProactiveSource = 'recommend' | 'visitors' | 'outreach';
+export type ProactiveSettings = {
+  source: ProactiveSource; instruction: string; enabled: boolean;
+  interval_minutes: number; browse_limit: number; comment_limit: number;
+  keyword: string; comments_per_note: number; dm_limit: number; share_note: boolean; filter_ads: boolean;
+  daily_start: string; daily_end: string;
+  agent_id: string; agent_snapshot?: AgentSnapshot;
+  revision?: string; next_at?: string;
+};
+export type ProactiveSnapshot = {
+  strategies: Record<ProactiveSource, ProactiveSettings>;
+  runs: Array<{ id: string; source: ProactiveSource; state: string; detail: string; created_at: string;
+    diagnostics?: { scanned?: number; prepared?: number; detail_reads?: number; read_budget_reached?: boolean;
+      counts?: Record<string, number>; records?: Array<{ note_id: string; title: string; author_name: string; outcome: string; reason: string }> } }>;
+  items: Array<{ id: string; source: ProactiveSource; account_nickname?: string; state: string; detail: string;
+    external_id: string; created_at: string; sent_at?: string; attempted_at?: string;
+    interaction?: 'comment' | 'dm'; sequence?: number; keyword?: string; share_note?: boolean; share_note_url?: string;
+    agent_snapshot?: AgentSnapshot;
+    messages?: Array<{ kind: string; state: string; external_id: string; detail: string }>;
+    title: string; author_name: string; note_url: string; text: string; reason: string; references: string[]; reference_status?: string }>;
+};
+export async function fetchProactive(accountId: number, signal?: AbortSignal): Promise<ProactiveSnapshot> {
+  return (await http.get(`/xhs/proactive/${accountId}`, { signal, timeout: 10000 })).data;
+}
+export async function fetchProactiveAgents(accountId: number, signal?: AbortSignal): Promise<{ connected: boolean; agents: AgentChoice[] }> {
+  return (await http.get(`/xhs/proactive/${accountId}/agents`, { signal, timeout: 10000 })).data;
+}
+export async function saveProactive(accountId: number, data: ProactiveSettings): Promise<ProactiveSettings> {
+  return (await http.put(`/xhs/proactive/${accountId}/settings/${data.source}`, data)).data;
+}
+export async function runProactive(accountId: number, source: ProactiveSource) {
+  return (await http.post(`/xhs/proactive/${accountId}/run/${source}`)).data;
 }

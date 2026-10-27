@@ -7,6 +7,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/leo-project/xhs
 Environment=CONFIG_FILE=/home/ubuntu/leo-project/xhs/.local/runtime.yaml
 Environment=PYTHONUNBUFFERED=1
+Environment=OPS_IDENTITY_URL=http://127.0.0.1:8787
 ExecStart=/home/ubuntu/leo-project/xhs/.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8772
 Restart=on-failure
 RestartSec=3

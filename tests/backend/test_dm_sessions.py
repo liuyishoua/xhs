@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select, text
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from test_direct_messages import database, event, empty_history
+from test_direct_messages import history_message
 from backend.app.core.time import SHANGHAI_TZ, shanghai_now
 from backend.app.models import PlatformAccount
 from backend.app.models.direct_message import DmHistory, DmListener, DmConversation
@@ -58,6 +59,53 @@ def prepare(db,client,mid='platform-id'):
     return row
 
 
+def test_empty_platform_record_does_not_suppress_inbound_and_legacy_ledger_is_corrected(database, session_client):
+    client = session_client
+    with database() as db:
+        row = prepare(db, client)
+        stamp = shanghai_now() - timedelta(seconds=2)
+        inbound = db.get(DmHistory, row.receipt['history_row_id'])
+        inbound.sent_at = stamp
+        placeholder = dm_history.save_message(db, 1, row.peer_id, 'empty-record', 'outbound',
+            '[暂不支持的消息类型：0]', stamp+timedelta(milliseconds=2), content_type=0)
+        db.commit()
+        dm.poll_channel(db, row, client)
+        assert row.state == 'skipped' and '本人已回复' in row.error
+        old_snapshot = dict(row.receipt['session_snapshot'])
+        placeholder_id = placeholder.id
+        raw = history_message('empty-record', 2, stamp+timedelta(milliseconds=2), sender='own', receiver='customer-a')
+        raw['content'] = json.dumps({'content_type': 0, 'content': ''})
+        incoming = history_message('platform-id', 1, stamp)
+        fetch = lambda *a, **kw: {'result': {'success': True}, 'out_message_list': [raw, incoming]}
+        dm_history.sync_history(db, db.get(PlatformAccount, 1), row.peer_id, fetch, refresh_existing=True)
+        assert db.get(DmHistory, placeholder_id).source == 'placeholder'
+        assert all(r.id != placeholder_id for r in dm_history.history_rows(db, 1, row.peer_id, stamp-timedelta(days=1), shanghai_now()))
+        dm.reset_analysis(db, row)
+        dm.prepare_history(db, row, empty_history)
+        dm.poll_channel(db, row, client)
+        assert row.state == 'ready' and row.receipt['session_snapshot']['eligible']
+        with client.store.db() as sql:
+            saved = sql.execute('SELECT body FROM session_messages WHERE session_id=? AND message_id=?',
+                (old_snapshot['session_id'], 'xhs-history:'+str(placeholder_id))).fetchone()
+            assert json.loads(saved['body'])['revoked']
+            previous = sql.execute('SELECT body FROM session_snapshots WHERE id=?', (old_snapshot['id'],)).fetchone()
+            assert not json.loads(previous['body'])['eligible']
+
+
+def test_owner_conversation_goal_is_scoped_and_passed_to_reply_task(database, session_client):
+    with database() as db:
+        row = prepare(db, session_client)
+        conversation = dm_history.conversation(db, 1, row.peer_id)
+        conversation.session_state = {'reply_goal': {'status': 'active', 'instruction': '自然聊清对方是想交流跑步还是另有事情，不要盘问。'}}
+        db.commit()
+        dm.poll_channel(db, row, session_client)
+        assert row.state == 'ready'
+        sent = row.receipt['channel_request']
+        assert '自然聊清' in sent['text']
+        assert sent['context']['owner_goal']['instruction'].startswith('自然聊清')
+        assert not dm_history.conversation(db, 2, row.peer_id).session_state.get('reply_goal')
+
+
 def test_incremental_sync_bounded_context_independent_tasks(database,session_client):
     client=session_client
     with database() as db:
@@ -68,6 +116,9 @@ def test_incremental_sync_bounded_context_independent_tasks(database,session_cli
         assert row.state=='ready'
         first_request=row.receipt['channel_request'];assert 'messages' not in first_request['context']
         assert first_request['session_snapshot_id'];assert '合成测试咨询' not in first_request['text']
+        snapshots=[data for _,path,data in client.calls if path.endswith('/snapshots')]
+        assert snapshots[0]['window_hours']==24
+        assert row.channel_payload['context']['history']['window_hours']==24
         assert len(row.channel_payload['context']['messages'])<=26
         sending=dm.claim_send(db,row.id);assert sending
         dm.finish_send(db,row.id,{'mid':sending.outbound_mid,'code':0,'msg':'ok','messageid':'ack1'})

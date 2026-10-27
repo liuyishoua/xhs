@@ -6,14 +6,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from backend.app.core.time import shanghai_now
 from backend.app.models import AccountCookieVersion, PlatformAccount, ModelConfig
-from backend.app.models.direct_message import DmListener, DirectMessage
+from backend.app.models.direct_message import DmListener, DirectMessage, DmManualMessage, DmConversation
 from backend.app.services.model_routing import channel_client
 from backend.app.services import dm_history as history
 from backend.app.services import dm_content, dm_media
 
 
 DM_INSTRUCTION = (
-    '本轮是小红书私人聊天决策。context.messages 是最近48小时双向会话快照，'
+    '本轮是小红书私人聊天决策。context.messages 是最近24小时双向会话快照，'
     'dialogue_state 标注已确认的自动生成历史，previous_analysis 是待核对观察。'
     '按 xhs-natural-expression 参与当前话题；不要把自动生成话术当作本人风格。'
     'context.media_catalog 的 image_number 对应真实附件，source=reaction_library 是可主动选用的账号表情候选。'
@@ -40,12 +40,13 @@ def account_identity(account):
 
 
 def listener_view(item):
-    return {k: getattr(item, k) for k in ('account_id', 'enabled', 'auto_reply', 'control_mode', 'route_id', 'state', 'error', 'started_at', 'updated_at')}
+    return {'agent_snapshot': item.agent_snapshot or {}, 'agent_id': (item.agent_snapshot or {}).get('id', ''), **{k: getattr(item, k) for k in ('account_id', 'enabled', 'auto_reply', 'control_mode', 'route_id', 'state', 'error', 'started_at', 'updated_at')}}
 
 
 def message_view(item):
     result = {**{k: getattr(item, k) for k in ('id', 'account_id', 'message_id', 'peer_id', 'text', 'media', 'state', 'reply_text', 'channel_event_id', 'error', 'created_at', 'updated_at')},
         'receipt': {k: v for k, v in (item.receipt or {}).items() if k not in ('analysis_attempts','channel_request')},
+        'agent_snapshot': (item.receipt or {}).get('agent_snapshot', {}),
         'history': (item.channel_payload.get('context') or {}).get('history'),
         'analysis': (item.receipt or {}).get('analysis'),
         'reply_messages': (item.receipt or {}).get('reply_messages', []),
@@ -154,7 +155,7 @@ def ingest(db, account, listener, entry):
         saved = history.save_message(db, account.id, row.peer_id, row.message_id, 'inbound', row.text,
             history.timestamp(stamp) or shanghai_now(), source='live', media=row.media,
             content_type=row.media[0]['content_type'] if row.media else 1)
-        row.receipt = {**(row.receipt or {}), 'history_row_id':saved.id}
+        row.receipt = {**(row.receipt or {}), 'history_row_id':saved.id, 'agent_snapshot': listener.agent_snapshot or {}}
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -167,27 +168,40 @@ def ingest(db, account, listener, entry):
 
 def reset_analysis(db, row):
     """A changed snapshot gets a new Channel id; never mutate an already submitted id."""
+    if (row.receipt or {}).get('business_task'):
+        row.state, row.error = 'held', 'business reply snapshot changed; submit a new task after reconciliation'
+        db.commit()
+        return
     if sent_plan_ids(row):
         row.state, row.error = 'superseded', '本轮已有已发消息，取消余下回复；由新消息触发下一轮'
         db.commit()
         return
     attempts = list((row.receipt or {}).get('analysis_attempts', []))
     attempts.append(dict(event_id=row.channel_event_id, payload=row.channel_payload,
+        agent_snapshot=(row.receipt or {}).get('agent_snapshot', {}),
         state=row.state, reply_text=row.reply_text, error=row.error))
     row.receipt = {**{k: v for k, v in (row.receipt or {}).items() if k not in ('analysis', 'approval', 'reply_message', 'reply_messages', 'reply_index', 'reply_due_at', 'session_snapshot', 'channel_request')}, 'analysis_attempts': attempts}
     row.channel_payload = {**row.channel_payload, 'message_id': 'dm:' + str(row.id) + ':' + str(uuid.uuid4()),
         'text': DM_INSTRUCTION + row.text, 'context': {'peer_id': row.peer_id}}
+    listener = db.get(DmListener, row.account_id)
+    if listener:
+        row.channel_payload['route_id'] = listener.route_id
+        row.receipt = {**row.receipt, 'agent_snapshot': listener.agent_snapshot or {}}
     row.channel_payload.pop('images', None)
     row.channel_payload.pop('session_snapshot_id', None)
     row.channel_event_id, row.reply_text, row.error, row.state = '', '', '', 'history_pending'
     db.commit()
 
 
-def prepare_history(db, row, fetch_page):
+def prepare_history(db, row, fetch_page, *, live_complete=False):
     if row.state not in ('history_pending', 'history_error'):
         return
     account = db.get(PlatformAccount, row.account_id)
-    status = history.sync_history(db, account, row.peer_id, fetch_page)
+    trigger = db.get(history.DmHistory, (row.receipt or {}).get('history_row_id')) if (row.receipt or {}).get('history_row_id') else None
+    import time
+    started = time.perf_counter()
+    status = history.sync_history(db, account, row.peer_id, fetch_page,
+        reuse_if_covers=trigger.sent_at if trigger else None, live_complete=live_complete)
     listener = db.get(DmListener, row.account_id)
     mode = listener.control_mode
     context = {**history.snapshot(db, account, row, status), 'control_mode': mode}
@@ -196,6 +210,10 @@ def prepare_history(db, row, fetch_page):
     row.channel_payload = {**row.channel_payload, 'context': context,
         'text': DM_INSTRUCTION + CONTROL_INSTRUCTIONS[mode] + row.text}
     row.state, row.error = 'queued', ''
+    row.receipt = {**(row.receipt or {}), 'timing': {**(row.receipt or {}).get('timing', {}),
+        'history_ms': round((time.perf_counter()-started)*1000, 2),
+        'history_source': status.get('read_source', 'platform_sync'),
+        'prepared_at': shanghai_now().isoformat()}}
     db.commit()
 
 
@@ -207,6 +225,9 @@ def poll_channel(db, row, client=None):
         from backend.app.services import dm_sessions
         if hasattr(client, 'session_snapshot') and not dm_sessions.prepare(db, row, client):
             return
+        if (row.receipt or {}).get('business_task'):
+            from backend.app.api.business import attach_reply_goal
+            attach_reply_goal(db, row)
         if not row.channel_payload['context'].get('media_prepared'):
             dm_media.prepare_inputs(db, row, client)
         # The immutable payload and original ID are committed before network I/O.
@@ -222,13 +243,19 @@ def poll_channel(db, row, client=None):
                 reset_analysis(db, row)
                 return
             raise
+        db.refresh(row)
+        if row.state!='queued':return
         row.channel_event_id = result['id']
         row.state = 'waiting'
         row.error = ''
+        row.receipt = {**(row.receipt or {}), 'timing': {**(row.receipt or {}).get('timing', {}),
+            'submitted_at': shanghai_now().isoformat()}}
         db.commit()
     if row.state != 'waiting':
         return
     status = client.status(row.channel_event_id, row.channel_payload['account_id'])
+    db.refresh(row)
+    if row.state!='waiting':return
     if status['state'] == 'succeeded':
         output = (status.get('result') or {}).get('output') or {}
         structured = output.get('structured') or {}
@@ -299,10 +326,17 @@ def claim_send(db, row_id):
     status = ((row.channel_payload.get('context') or {}).get('history') or {}) if row else {}
     if not status.get('complete') or not status.get('until'):
         return None
+    from backend.app.api.business import business_reply_guard
+    if not business_reply_guard(row):
+        row.state, row.error = 'held', 'business goal authorization inactive; not sent'
+        db.commit()
+        return None
     if not reply_is_due(row):
         return None
     listener = db.get(DmListener, row.account_id)
     if not listener or not listener.enabled or not listener.auto_reply:
+        return None
+    if row.channel_payload.get('route_id') != listener.route_id:
         return None
     policy = (row.channel_payload.get('context') or {}).get('control_mode')
     if policy and policy != listener.control_mode:
@@ -325,14 +359,20 @@ def claim_send(db, row_id):
         receipt.update(reply_messages=plan, reply_message=plan[index])
     result = db.execute(update(DirectMessage).where(DirectMessage.id == row_id,
         DirectMessage.state == 'ready', DirectMessage.outbound_mid == row.outbound_mid,
+        ~select(DmConversation.id).where(DmConversation.account_id==DirectMessage.account_id,
+            DmConversation.peer_id==DirectMessage.peer_id,
+            DmConversation.session_state['manual_control'].as_boolean().is_(True)).exists(),
+        ~select(DmManualMessage.id).where(DmManualMessage.account_id==DirectMessage.account_id,
+            DmManualMessage.peer_id==DirectMessage.peer_id,DmManualMessage.state.in_(['queued','sending','uncertain'])).exists(),
         select(DmListener.account_id).where(DmListener.account_id == DirectMessage.account_id,
             DmListener.enabled.is_(True), DmListener.auto_reply.is_(True),
-            DmListener.control_mode == listener.control_mode).exists(),
+            DmListener.control_mode == listener.control_mode, DmListener.route_id == listener.route_id).exists(),
         ~select(newer.id).where(
             newer.account_id == DirectMessage.account_id, newer.peer_id == DirectMessage.peer_id,
             newer.id > DirectMessage.id).exists(),
         ~select(DmHistory.id).where(DmHistory.account_id == DirectMessage.account_id,
             DmHistory.peer_id == DirectMessage.peer_id, DmHistory.direction == 'outbound',
+            DmHistory.source != 'placeholder',
             DmHistory.message_id.not_in(sent_plan_ids(row)),
             DmHistory.sent_at > snapshot_until).exists()).values(state='sending', outbound_mid=mid, receipt=receipt, error=''))
     db.commit()

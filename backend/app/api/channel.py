@@ -17,6 +17,7 @@ CONFIG=Path(__file__).resolve().parents[3]/'.local/web/channel.json'
 class MessageRequest(BaseModel):
     message_id:str=Field(min_length=8,max_length=160)
     account_id:int|None=None
+    agent_id:str=Field(default='',max_length=80)
     text:str=Field(default='',max_length=16000)
     images:list[str]=Field(default_factory=list,max_length=6)
     context:dict[str,Any]=Field(default_factory=dict)
@@ -39,7 +40,21 @@ def client():
 @router.post('/messages',status_code=202)
 def submit(data:MessageRequest,user:User=Depends(get_current_user),db:Session=Depends(get_db)):
     account=identity(user,db,data.account_id)
-    try:return client().send(account,data.message_id,data.text,data.images,data.category,data.conversation_id,data.context,surface='content',event_type='content.rewrite_requested')
+    channel = client()
+    route_id = ''
+    context = data.context
+    if data.agent_id:
+        from backend.app.services.model_routing import resolve_agent
+        owner = db.get(PlatformAccount, data.account_id) if data.account_id else None
+        if not owner or owner.platform != 'xhs':
+            raise HTTPException(400, '请选择执行账号')
+        try:
+            route, snapshot = resolve_agent(channel.catalog(), 'content', owner, data.agent_id)
+        except ChannelError as exc:
+            raise HTTPException(503, str(exc)) from None
+        route_id = route['id']
+        context = {**context, 'agent_snapshot': snapshot}
+    try:return channel.send(account,data.message_id,data.text,data.images,data.category,data.conversation_id,context,surface='content',event_type='content.rewrite_requested',route_id=route_id)
     except ChannelError as exc:raise HTTPException(502,str(exc)) from None
 
 

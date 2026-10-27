@@ -267,7 +267,7 @@ export function XhsImageStudioPage() {
                       height: 60,
                       borderRadius: 4,
                       overflow: "hidden",
-                      border: "1px solid #333",
+                      border: "1px solid var(--ui-line,#333)",
                     }}
                   >
                     {isRenderableImage(url) ? (
@@ -288,10 +288,10 @@ export function XhsImageStudioPage() {
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "center",
-                          background: "#1a1a1a",
+                          background: "var(--ui-surface,#1a1a1a)",
                         }}
                       >
-                        <PictureOutlined style={{ fontSize: 20, color: "#666" }} />
+                        <PictureOutlined style={{ fontSize: 20, color: "var(--ui-muted,#666)" }} />
                       </div>
                     )}
                     <Button
@@ -325,15 +325,15 @@ export function XhsImageStudioPage() {
                     width: 60,
                     height: 60,
                     borderRadius: 4,
-                    border: "1px dashed #444",
+                    border: "1px dashed var(--ui-line,#444)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
                     cursor: "pointer",
-                    background: "#1a1a1a",
+                    background: "var(--ui-surface,#1a1a1a)",
                   }}
                 >
-                  <PlusOutlined style={{ fontSize: 20, color: "#666" }} />
+                  <PlusOutlined style={{ fontSize: 20, color: "var(--ui-muted,#666)" }} />
                 </div>
               </Space>
             </div>
@@ -383,7 +383,7 @@ export function XhsImageStudioPage() {
                 </Text>
                 <div
                   style={{
-                    background: "#1a1a1a",
+                    background: "var(--ui-surface,#1a1a1a)",
                     borderRadius: 6,
                     padding: 8,
                     textAlign: "center",
@@ -453,7 +453,7 @@ export function XhsImageStudioPage() {
             {description && (
               <Paragraph
                 style={{
-                  background: "#262626",
+                  background: "var(--ui-surface,#262626)",
                   padding: 12,
                   borderRadius: 6,
                   fontSize: 13,
@@ -508,7 +508,7 @@ export function XhsImageStudioPage() {
                               marginBottom: 6,
                               overflow: "hidden",
                               borderRadius: 4,
-                              background: "#1a1a1a",
+                              background: "var(--ui-surface,#1a1a1a)",
                             }}
                           >
                             {isRenderableImage(asset.file_path) ? (
@@ -522,7 +522,7 @@ export function XhsImageStudioPage() {
                               />
                             ) : (
                               <PictureOutlined
-                                style={{ fontSize: 28, color: "#555" }}
+                                style={{ fontSize: 28, color: "var(--ui-muted,#555)" }}
                               />
                             )}
                           </div>
@@ -615,7 +615,7 @@ export function XhsImageStudioPage() {
                               marginBottom: 6,
                               overflow: "hidden",
                               borderRadius: 4,
-                              background: "#1a1a1a",
+                              background: "var(--ui-surface,#1a1a1a)",
                             }}
                           >
                             <Image
@@ -696,12 +696,12 @@ export function XhsImageStudioPage() {
                             cursor: "pointer",
                             borderRadius: 4,
                             overflow: "hidden",
-                            border: "1px solid #333",
+                            border: "1px solid var(--ui-line,#333)",
                             height: 80,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            background: "#1a1a1a",
+                            background: "var(--ui-surface,#1a1a1a)",
                           }}
                         >
                           <img
@@ -743,12 +743,12 @@ export function XhsImageStudioPage() {
                             cursor: "pointer",
                             borderRadius: 4,
                             overflow: "hidden",
-                            border: "1px solid #333",
+                            border: "1px solid var(--ui-line,#333)",
                             height: 80,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
-                            background: "#1a1a1a",
+                            background: "var(--ui-surface,#1a1a1a)",
                           }}
                         >
                           {isRenderableImage(asset.file_path) ? (
@@ -763,7 +763,7 @@ export function XhsImageStudioPage() {
                             />
                           ) : (
                             <PictureOutlined
-                              style={{ fontSize: 24, color: "#555" }}
+                              style={{ fontSize: 24, color: "var(--ui-muted,#555)" }}
                             />
                           )}
                         </div>

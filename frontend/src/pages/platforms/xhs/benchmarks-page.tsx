@@ -38,8 +38,8 @@ import type { MonitoringTarget, MonitoringSnapshot } from "../../../types";
 const { Text } = Typography;
 
 const cardStyle: React.CSSProperties = {
-  background: "#1f1f1f",
-  borderColor: "#303030",
+  background: "var(--ui-surface,#1f1f1f)",
+  borderColor: "var(--ui-line,#303030)",
 };
 
 function extractEngagement(snapshot: MonitoringSnapshot | undefined): {
@@ -396,7 +396,7 @@ export function XhsBenchmarksPage() {
                       gap: 16,
                       marginBottom: 12,
                       padding: "8px 12px",
-                      background: "#141414",
+                      background: "var(--ui-surface,#141414)",
                       borderRadius: 6,
                     }}
                   >

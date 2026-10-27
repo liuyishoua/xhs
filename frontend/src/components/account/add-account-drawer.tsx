@@ -3,6 +3,8 @@ import { useState } from "react";
 
 import type { PlatformAccount } from "../../types";
 import { PhoneLoginPanel } from "./phone-login-panel";
+import { QrLoginPanel } from "./qr-login-panel";
+import { CookieLoginPanel } from "./cookie-login-panel";
 
 type AddAccountDrawerProps = {
   open: boolean;
@@ -20,6 +22,7 @@ const accountTypeOptions = [
 
 export function AddAccountDrawer({ open, account, onClose, onBound }: AddAccountDrawerProps) {
   const [selectedAccountType, setAccountType] = useState<AccountType>("pc");
+  const [loginMethod, setLoginMethod] = useState("qr");
   const accountType: AccountType = account?.sub_type === "creator" ? "creator" : account ? "pc" : selectedAccountType;
 
   function handleConfirmed(confirmedAccount: PlatformAccount) {
@@ -38,10 +41,10 @@ export function AddAccountDrawer({ open, account, onClose, onBound }: AddAccount
     <Drawer
       title={
         <div>
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
+          <div style={{ fontSize: 12, color: "var(--ui-muted)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
             XHS Account
           </div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>{account ? "重新登录小红书账号" : "添加小红书账号"}</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: "var(--ui-muted)" }}>{account ? "重新登录小红书账号" : "添加小红书账号"}</div>
         </div>
       }
       placement="right"
@@ -50,8 +53,8 @@ export function AddAccountDrawer({ open, account, onClose, onBound }: AddAccount
       onClose={onClose}
       destroyOnClose
       styles={{
-        header: { background: "#1f1f1f", borderBottom: "1px solid #303030" },
-        body: { background: "#141414", padding: 24 },
+        header: { background: "var(--ui-surface,#1f1f1f)", borderBottom: "1px solid var(--ui-line,#303030)" },
+        body: { background: "var(--ui-surface,#141414)", padding: 24 },
       }}
     >
       {account ? (
@@ -73,12 +76,17 @@ export function AddAccountDrawer({ open, account, onClose, onBound }: AddAccount
         />
       </div>
 
-      <PhoneLoginPanel
+      <Segmented block style={{ marginBottom: 20 }} value={loginMethod}
+        options={[{ label: "扫码登录", value: "qr" }, { label: "短信登录", value: "phone" }, { label: "Cookie 导入", value: "cookie" }]}
+        onChange={value => setLoginMethod(String(value))} />
+      {loginMethod === "qr" ? <QrLoginPanel key={accountType} accountType={accountType}
+        accountId={account?.id} onConfirmed={handleConfirmed} /> : loginMethod === "cookie" ? <CookieLoginPanel
+        key={accountType} accountType={accountType} accountId={account?.id} onConfirmed={handleConfirmed} /> : <PhoneLoginPanel
         key={accountType}
         accountType={accountType}
         accountId={account?.id}
         onConfirmed={handleConfirmed}
-      />
+      />}
     </Drawer>
   );
 }

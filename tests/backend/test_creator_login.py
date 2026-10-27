@@ -96,7 +96,7 @@ def test_login_api_returns_actionable_errors_without_transport_details(path, bod
     class Adapter:
         def create_qrcode(self): raise error
         def create_phone_session(self, phone): raise error
-    app.dependency_overrides[get_db] = lambda: None
+    app.dependency_overrides[get_db] = lambda: SimpleNamespace(add=lambda row: None, commit=lambda: None)
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
     app.dependency_overrides[login_sessions.get_creator_login_adapter] = Adapter
     app.dependency_overrides[login_sessions.get_pc_login_adapter] = Adapter

@@ -50,9 +50,17 @@ class XhsCreatorLoginAdapter:
 
     def get_user_info(self, cookies: dict[str, Any]) -> dict[str, Any]:
         with self._api() as api:
-            success, data, _ = api.get_user_info(cookies)
+            success, data, refreshed = api.get_user_info(cookies)
+            code = getattr(api, 'last_user_info_code', None)
+            http_status = getattr(api, 'last_user_info_http_status', None)
         if not success:
-            raise RuntimeError("Failed to fetch XHS Creator user info")
+            from backend.app.services.account_health import creator_session_failure
+            raise creator_session_failure(code, http_status)
+        if not data.get('userId'):
+            raise RuntimeError('Creator profile has no account identity')
+        refreshed = dict(refreshed)
+        cookies.clear()
+        cookies.update(refreshed)
         return {
             "external_user_id": data.get("userId", ""),
             "nickname": data.get("userName", ""),
@@ -67,6 +75,41 @@ class XhsCreatorLoginAdapter:
                 "raw": data,
             },
         }
+
+    def check_session(self, cookies: dict[str, Any]) -> dict[str, Any]:
+        """Verify identity AND upload permission; this never uploads or posts."""
+        from backend.app.adapters.xhs.creator_api_adapter import XhsCreatorApiAdapter
+        from backend.app.services.account_health import CreatorUploadError, AccountCheckError
+        from xhs_utils.xhs_core.cookies import cookie_header
+
+        def verify(values):
+            info = self.get_user_info(values)
+            adapter = XhsCreatorApiAdapter(cookie_header(values))
+            try:
+                adapter.check_upload_permission()
+            except CreatorUploadError as exc:
+                raise exc.account_error from None
+            values.update(adapter.refreshed_cookies or {})
+            return info
+
+        checked = dict(cookies)
+        try:
+            info = verify(checked)
+        except AccountCheckError as exc:
+            if exc.account_status != 'expired':
+                raise
+            # A short-lived Creator token can expire while its existing SSO
+            # session remains valid. Ask CAS once, with the same credentials;
+            # no SMS, anonymous session reset or risk-verification workaround.
+            with self._api() as api:
+                session = api.query_session(dict(cookies))
+            if not session.get('active'):
+                raise exc
+            checked = dict(session['cookies'])
+            info = verify(checked)
+        cookies.clear()
+        cookies.update(checked)
+        return info
 
     def create_phone_session(self, phone: str) -> dict[str, Any]:
         with self._api() as api:
