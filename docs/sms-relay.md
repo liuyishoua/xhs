@@ -1,6 +1,6 @@
 # 手机验证码转交
 
-手机Webhook使用标准HTTPS入口`https://d.58nft.net/mobile-sms/inbound/{user_id}`（443端口），由Caddy仅代理此路径到工作台。旧9450端口接口保留。手机号、签名和正文不放入URL。默认消息模板中的日期、来源号码和卡槽字段不参与验证码候选提取；验证码须与明确的验证码文字标签相邻。
+手机Webhook使用标准HTTPS入口`https://portal.example.com/mobile-sms/inbound/{user_id}`（443端口），由Caddy仅代理此路径到工作台。旧20036端口接口保留。手机号、签名和正文不放入URL。默认消息模板中的日期、来源号码和卡槽字段不参与验证码候选提取；验证码须与明确的验证码文字标签相邻。
 
 `/api/sms-relay/setup` 是手机配置页；用原工作台账号登录后读取自己的WebServer地址及专用Secret。SmsForwarder发送通道使用Webhook、POST，WebParams留空，消息模板保留默认。设置Secret后，表单携带timestamp、sign和content。签名兼容SmsForwarder的HMAC-SHA256规则，五分钟过期；不接受浏览器Origin。配置接口需要工作台Bearer凭据并禁止缓存。
 

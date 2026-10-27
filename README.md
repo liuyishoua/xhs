@@ -1,5 +1,7 @@
 # xhs
 
+> 文档中的 example.com 域名、192.0.2.* 地址、/opt/operator 路径及 20000 段端口均为示例，请按实际部署配置替换。私有账号配置与运行数据不随源码提交。
+
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-orange)](LICENSE)
 
 独立运行的小红书账号与内容工作台，基于 [cv-cat/XHS_ALL_IN_ONE](https://github.com/cv-cat/XHS_ALL_IN_ONE)。
@@ -26,10 +28,10 @@ cd ..
 设置 `frontend.serve_static: true`，保留 `scheduler.enabled: false`，然后运行：
 
 ```bash
-CONFIG_FILE=.local/runtime.yaml .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8772
+CONFIG_FILE=.local/runtime.yaml .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 20004
 ```
 
-打开 **http://127.0.0.1:8772**，按页面完成工作台注册与平台账号连接。
+打开 **http://127.0.0.1:20004**，按页面完成工作台注册与平台账号连接。
 配置加载、数据库迁移、HTTPS 及平台网络要求见 [部署说明](deploy/README.md)。
 本项目没有通用离线演示启动参数；后端回归测试使用临时数据库和模拟平台。
 
@@ -37,7 +39,7 @@ CONFIG_FILE=.local/runtime.yaml .venv/bin/python -m uvicorn backend.app.main:app
 
 工作台账号、小红书 PC 账号和 Creator 账号分别管理。扫码或手机号登录按平台当前要求完成，
 Cookie 与平台会话加密保存到本地。发布、发送和自动化依赖自己的账号权限及明确配置。
-Channel 和 Multica 集成是可选能力，接入说明见 [模型与私信部署](deploy/MODELS_AND_DM.md)。
+Channel 和 Multica 集成是可选能力，接入说明见 模型与私信部署（本地资料）。
 需要家庭网络时配置自己的代理和授权，不直接复制历史服务器或 Mac 主机地址。
 服务恢复不代表平台登录或真实业务一定成功，应检查实际状态及回执。
 

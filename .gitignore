@@ -72,3 +72,10 @@ __pycache__/
 docs/*verification*.json
 docs/acceptance.json
 docs/previews/*production*
+
+# Private operator configuration and local validation records
+/deploy/HOME_NETWORK.md
+/deploy/MODELS_AND_DM.md
+/deploy/XHS_CONTENT_AUTOMATION.md
+/deploy/XHS_DATING_AGENT.md
+/deploy/XHS_OUTDOOR_AUTOMATION.md

@@ -4,7 +4,7 @@
 
 账号主人可在单个 `DmConversation.session_state.reply_goal` 保存 `status=active` 的会话指示。仅该账号/对方的后续回复任务取得 `owner_goal`，不修改其他联系人或全局 Agent 指令；任务完成或撤销时将状态改为非 active。
 
-入口：<https://d.58nft.net:9450/platforms/xhs/messages>。
+入口：<https://portal.example.com:20036/platforms/xhs/messages>。
 
 ## 账号控制方式
 
